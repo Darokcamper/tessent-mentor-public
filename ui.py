@@ -139,6 +139,17 @@ with st.sidebar:
         log_files = sorted(LOG_DIR.glob("*.log"))
         if log_files:
             st.caption(f"Files: `{', '.join(f.name for f in log_files[-3:])}`")
+            # Download button for the latest log file
+            latest_log = log_files[-1]
+            with open(latest_log, "r", encoding="utf-8") as f:
+                log_content = f.read()
+            st.download_button(
+                label=f"⬇️ Download {latest_log.name}",
+                data=log_content,
+                file_name=latest_log.name,
+                mime="text/plain",
+                help="Download the latest session log to your local machine",
+            )
     except Exception:
         pass
 
