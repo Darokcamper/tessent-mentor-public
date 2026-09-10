@@ -71,6 +71,8 @@ def restore_knowledge() -> bool:
 
     token = _get("KB_BUNDLE_TOKEN")
     _log(f"downloading bundle: {kb_url}")
+    if token:
+        _log(f"token type: {'fine-grained' if token.startswith('github_pat_') else 'classic'} (len={len(token)})")
     try:
         req = urllib.request.Request(kb_url)
         if token:
