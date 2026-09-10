@@ -7,6 +7,11 @@ missing, downloads and unpacks the private bundle from a GitHub release:
   KB_BUNDLE_URL   full URL of the bundle asset on a PRIVATE repo's release
   KB_BUNDLE_TOKEN a GitHub token with read access to that private repo
 
+IMPORTANT: fine-grained PATs require downloading via the GitHub API endpoint
+(NOT the browser download URL), because urllib strips the Authorization header
+on redirect to GitHub's CDN, and GitHub masks auth failures as 404 for private
+repos. This module auto-detects the API endpoint from the release URL.
+
 Everything is optional: if the vars are unset or the download fails, the app
 still boots -- RAG retrieval and the Exam Bank degrade gracefully (the code
 falls back to plain-text search / empty lists), and Deep Study works only
@@ -17,11 +22,15 @@ Run standalone for testing:
   python core/bootstrap.py --check    (report status only, no download)
 """
 import io
+import json
 import os
+import re
 import sys
-import zipfile
+import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 KB_DIR = PROJECT_ROOT / "knowledge"
@@ -52,6 +61,81 @@ def restore_done() -> bool:
     return SENTINEL.exists() and EXAM_FILE.exists()
 
 
+def _parse_release_url(kb_url: str):
+    """Parse a GitHub release download URL into (owner, repo, tag, asset_name).
+
+    Supports formats:
+      https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}
+      https://github.com/{owner}/{repo}/releases/latest/download/{asset_name}
+    """
+    parsed = urlparse(kb_url)
+    if parsed.netloc != "github.com":
+        return None
+    parts = parsed.path.strip("/").split("/")
+    # Expected: owner, repo, "releases", "download", tag, asset_name...
+    if len(parts) < 6:
+        return None
+    owner, repo = parts[0], parts[1]
+    if parts[2] != "releases" or parts[3] != "download":
+        return None
+    tag = parts[4]
+    asset_name = parts[5]
+    if tag == "latest":
+        tag = _resolve_latest_tag(owner, repo)
+    return owner, repo, tag, asset_name
+
+
+def _resolve_latest_tag(owner: str, repo: str) -> str:
+    """Resolve 'latest' to the actual tag name via GitHub API."""
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+    req = urllib.request.Request(api_url)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+    token = _get("KB_BUNDLE_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("tag_name", "")
+    except Exception as exc:
+        _log(f"failed to resolve latest tag: {exc}")
+        return ""
+
+
+def _get_asset_id(owner: str, repo: str, tag: str, asset_name: str):
+    """Get the asset ID for a release asset via GitHub API."""
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
+    req = urllib.request.Request(api_url)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+    token = _get("KB_BUNDLE_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+        for asset in data.get("assets", []):
+            if asset.get("name") == asset_name:
+                return asset.get("id")
+    return None
+
+
+def _download_via_api(owner: str, repo: str, asset_id: int, token: str):
+    """Download a release asset via GitHub API (works with fine-grained PATs).
+
+    The API endpoint serves content directly (no redirect), so the Bearer
+    token stays intact.
+    """
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_id}"
+    req = urllib.request.Request(api_url)
+    req.add_header("Accept", "application/octet-stream")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+    with urllib.request.urlopen(req, timeout=600) as resp:
+        _log(f"API response status: {resp.status}")
+        return resp.read()
+
+
 def restore_knowledge() -> bool:
     """Download + unpack the private bundle. Returns True when data is ready.
 
@@ -73,23 +157,37 @@ def restore_knowledge() -> bool:
     _log(f"downloading bundle: {kb_url}")
     if token:
         _log(f"token type: {'fine-grained' if token.startswith('github_pat_') else 'classic'} (len={len(token)})")
+
+    # Parse the release URL to get owner, repo, tag, and asset name
+    parsed = _parse_release_url(kb_url)
+    if not parsed:
+        _log(f"ERROR: could not parse release URL: {kb_url}")
+        return False
+
+    owner, repo, tag, asset_name = parsed
+    _log(f"parsed release: owner={owner}, repo={repo}, tag={tag}, asset={asset_name}")
+
+    # Get the asset ID via the API
+    if not token:
+        _log("WARNING: no KB_BUNDLE_TOKEN - download will likely 404 on private release")
+        return False
+
+    _log("fetching asset ID via GitHub API...")
+    asset_id = _get_asset_id(owner, repo, tag, asset_name)
+    if not asset_id:
+        _log(f"ERROR: asset '{asset_name}' not found in release {tag}")
+        _log("app will boot WITHOUT the private knowledge base (RAG/Exam Bank degraded)")
+        return False
+
+    _log(f"found asset ID: {asset_id} - downloading via API...")
+
     try:
-        req = urllib.request.Request(kb_url)
-        if token:
-            req.add_header("Authorization", f"Bearer {token}")
-            req.add_header("Accept", "application/octet-stream")
-            _log("token present (Bearer) - authenticated download")
-        else:
-            _log("WARNING: no KB_BUNDLE_TOKEN - download will likely 404 on private release")
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            _log(f"response status: {resp.status}")
-            _log(f"response headers: {dict(resp.headers)}")
-            data = resp.read()
+        data = _download_via_api(owner, repo, asset_id, token)
     except urllib.error.HTTPError as exc:
         _log(f"FAILED to download bundle: HTTP {exc.code} {exc.reason}")
         _log(f"response headers: {dict(exc.headers)}")
         try:
-            body = exc.read().decode('utf-8', errors='replace')[:500]
+            body = exc.read().decode("utf-8", errors="replace")[:500]
             _log(f"response body: {body}")
         except:
             pass
