@@ -492,6 +492,7 @@ Let's begin!
 
     agent_scratchpad = []
     max_iterations = 5
+    tools_called = False
 
     for i in range(max_iterations):
         current_messages = list(messages)
@@ -510,6 +511,17 @@ Let's begin!
         print(content)
         
         if "Final Answer:" in content:
+            # Tool-gate: refuse an answer produced without calling any tools,
+            # so the model cannot respond purely from parametric memory.
+            if not tools_called:
+                agent_scratchpad.append((
+                    content,
+                    "Error: You output a Final Answer WITHOUT searching the verified sources. "
+                    "This is forbidden. You MUST first call Action: search_verified_notes(query=\"<key technical terms from the question>\") "
+                    "to retrieve grounded information. Retry now using the required Thought/Action format. "
+                    "Cite the Source Document and Page from the observations in your eventual Final Answer.",
+                ))
+                continue
             final_part = content.split("Final Answer:", 1)[1].strip()
             # Post-processing fallback verification
             normalized = final_part.lower()
@@ -532,6 +544,7 @@ Let's begin!
             observation = f"Error: Could not parse Action: '{action_str}'. Please use the format: ToolName(arg1=val1, ...)"
         else:
             print(f"Calling Tool: {tool_name} with args {args}")
+            tools_called = True
             observation = execute_tool(tool_name, args)
             if len(observation) > 8000:
                 observation = observation[:8000] + "\n... [Observation Truncated for space] ..."
