@@ -82,7 +82,19 @@ def restore_knowledge() -> bool:
         else:
             _log("WARNING: no KB_BUNDLE_TOKEN - download will likely 404 on private release")
         with urllib.request.urlopen(req, timeout=600) as resp:
+            _log(f"response status: {resp.status}")
+            _log(f"response headers: {dict(resp.headers)}")
             data = resp.read()
+    except urllib.error.HTTPError as exc:
+        _log(f"FAILED to download bundle: HTTP {exc.code} {exc.reason}")
+        _log(f"response headers: {dict(exc.headers)}")
+        try:
+            body = exc.read().decode('utf-8', errors='replace')[:500]
+            _log(f"response body: {body}")
+        except:
+            pass
+        _log("app will boot WITHOUT the private knowledge base (RAG/Exam Bank degraded)")
+        return False
     except Exception as exc:
         _log(f"FAILED to download bundle: {exc}")
         _log("app will boot WITHOUT the private knowledge base (RAG/Exam Bank degraded)")
