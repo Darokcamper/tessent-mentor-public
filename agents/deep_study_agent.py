@@ -461,7 +461,7 @@ def list_lab_files_at_once(lab_name: str) -> dict:
             "total_text": 2
         }
     """
-    from agents.diagram_vision import find_lab_screenshots
+    from agents.diagram_vision import find_lab_screenshots, SCREENSHOT_BASE
 
     labs_base = SCREENSHOT_BASE / "10.Labs"
     result = {
