@@ -256,7 +256,23 @@ def search_verified_notes(query: str, source_filter: str = None):
         k = 8 if source_filter else 4
         results = retrieve(query, top_k=k, source_filter=source_filter)
         if not results:
-            return "No matching chunks found in verified notes."
+            if source_filter:
+                return (
+                    f"No matching chunks found in verified notes for source_filter='{source_filter}'. "
+                    "That file stem may be wrong. Call list_verified_sources() to get valid file stems, "
+                    "then retry search_verified_notes with a corrected filter or without one. "
+                    "IMPORTANT: Do NOT answer from your own pre-trained knowledge. If a corrected search "
+                    "still finds nothing, your Final Answer MUST be: 'I do not have the exact answer in my "
+                    "verified source documents.' followed by the mandated source-file list and refinement suggestions."
+                )
+            return (
+                "No matching chunks found in verified notes. "
+                "IMPORTANT: Do NOT answer from your own pre-trained knowledge. Try rephrasing the query with "
+                "different key technical terms (e.g. expand acronyms), or call list_verified_sources() "
+                "to see available files. If searches still find nothing relevant, your Final Answer MUST be: "
+                "'I do not have the exact answer in my verified source documents.' followed by the mandated "
+                "source-file list and refinement suggestions."
+            )
             
         parts = []
         for r in results:
