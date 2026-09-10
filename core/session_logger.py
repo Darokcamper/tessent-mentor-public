@@ -11,10 +11,12 @@ Key design:
 - One log file per date: e.g. session_logs/2026-09-02.log
 - Each entry is a clearly delimited block with a header, type, timestamp, and body.
 - Entries are appended immediately (flush) so data survives a crash/restart.
+- Auto-syncs to private GitHub repo after each entry (if configured).
 """
 
 import os
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +29,67 @@ _handles = {}
 
 ATTACHMENT_DIR = LOG_DIR / "attachments"
 ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Auto-sync configuration
+_AUTO_SYNC_ENABLED = True
+_AUTO_SYNC_REPO_URL = "https://github.com/Darokcamper/tessent_ai.git"
+_AUTO_SYNC_BRANCH = "main"
+_AUTO_SYNC_REMOTE = "origin"
+
+
+def _get_github_token():
+    """Get GitHub token from environment or Streamlit secrets."""
+    token = os.getenv("GITHUB_TOKEN", "")
+    if token:
+        return token
+    try:
+        import streamlit as st
+        return str(st.secrets.get("GITHUB_TOKEN", ""))
+    except Exception:
+        return ""
+
+
+def _auto_sync_to_github(filepath: Path):
+    """Auto-commit and push the log file to the private GitHub repo."""
+    if not _AUTO_SYNC_ENABLED:
+        return
+
+    token = _get_github_token()
+    if not token:
+        return
+
+    def _sync():
+        try:
+            from git import Repo
+            import git
+
+            # Clone or open the repo
+            repo_dir = PROJECT_ROOT / ".session_sync_repo"
+            if not repo_dir.exists():
+                repo = Repo.clone_from(
+                    _AUTO_SYNC_REPO_URL.replace("https://", f"https://{token}@"),
+                    repo_dir,
+                    branch=_AUTO_SYNC_BRANCH,
+                )
+            else:
+                repo = Repo(repo_dir)
+                repo.remotes.origin.pull()
+
+            # Copy the log file to the repo
+            dest = repo_dir / "session_logs" / filepath.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(filepath.read_text(encoding="utf-8"), encoding="utf-8")
+
+            # Commit and push
+            repo.index.add([str(dest.relative_to(repo_dir))])
+            repo.index.commit(f"auto-sync: {filepath.name} @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            repo.remotes.origin.push()
+        except Exception:
+            pass  # Never crash the UI because of sync failures
+
+    # Run in background thread to not block the UI
+    thread = threading.Thread(target=_sync, daemon=True)
+    thread.start()
 
 
 def save_attachment(bytes_or_path: bytes, filename: str, source_folder: Path = ATTACHMENT_DIR) -> str:
@@ -103,6 +166,12 @@ def _write_block(section: str, field_lines: list) -> None:
                 f.write("\n".join(lines))
         except Exception:
             pass
+
+    # Auto-sync to GitHub after each entry
+    try:
+        _auto_sync_to_github(_today_path())
+    except Exception:
+        pass
 
 
 def close():
