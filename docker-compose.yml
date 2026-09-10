@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  vlsi-mentor-ai:
+    build: .
+    container_name: vlsi_mentor_ai
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      # Auth gate: password + optional email allowlist (overrides .env values)
+      - APP_PASSWORD=${APP_PASSWORD:-}
+      - APP_ALLOWED_EMAILS=${APP_ALLOWED_EMAILS:-}
+      # Private knowledge bundle restore (only needed for data-light deploys)
+      - KB_BUNDLE_URL=${KB_BUNDLE_URL:-}
+      - KB_BUNDLE_TOKEN=${KB_BUNDLE_TOKEN:-}
+    volumes:
+      - ./knowledge:/app/knowledge
+    restart: unless-stopped

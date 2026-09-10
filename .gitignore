@@ -1,0 +1,21 @@
+# Private knowledge base is restored at boot by core/bootstrap.py
+knowledge/*
+!knowledge/README.md
+
+# Environments & secrets
+venv/
+ocr_env/
+.env
+.streamlit/secrets.toml
+.streamlit/config.toml
+
+# Python
+__pycache__/
+*.pyc
+
+# Generated at runtime
+reports/
+session_logs/
+*.log
+dist/
+_bootstrap_done*

@@ -1,0 +1,6 @@
+# OS-level packages for Streamlit Community Cloud (installed via apt-get at deploy).
+# Mirrors the apt packages in the Dockerfile. Only needed at runtime (scanned-PDF
+# OCR via ocrmypdf); none of these are required for app boot.
+tesseract-ocr
+tesseract-ocr-eng
+ghostscript
