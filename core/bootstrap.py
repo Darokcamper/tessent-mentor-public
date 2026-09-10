@@ -74,8 +74,11 @@ def restore_knowledge() -> bool:
     try:
         req = urllib.request.Request(kb_url)
         if token:
-            req.add_header("Authorization", f"token {token}")
+            req.add_header("Authorization", f"Bearer {token}")
             req.add_header("Accept", "application/octet-stream")
+            _log("token present (Bearer) - authenticated download")
+        else:
+            _log("WARNING: no KB_BUNDLE_TOKEN - download will likely 404 on private release")
         with urllib.request.urlopen(req, timeout=600) as resp:
             data = resp.read()
     except Exception as exc:
