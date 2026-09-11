@@ -210,62 +210,72 @@ def _password_form():
 
 
 def require_auth() -> bool:
-    """Block rendering until the user passes the gate. Returns True when authed.
+    """Block rendering until the user passes the gate. Returns True when authenticated.
 
-    Behavior:
-      - [auth] in secrets  -> Google sign-in (OIDC); password form as fallback
-                              if the OIDC redirect cannot be initiated.
-      - APP_PASSWORD set   -> email + password (+ 2FA) form.
-      - APP_ALLOWED_EMAILS -> entered/Google email must be on the list.
-      - Neither configured -> app open (auth disabled, local dev default).
+    Behavior (layers auto-detected):
+      - [auth] + APP_PASSWORD(S) -> user chooses Google OR email+password(+2FA)
+      - [auth] only               -> Google sign-in (OIDC)
+      - APP_PASSWORD(S) only      -> email + password (+ TOTP 2FA)
+      - APP_ALLOWED_EMAILS        -> entered/Google email must be on the list
+      - nothing configured        -> open access (local dev default)
     """
     if is_authenticated():
         return True
 
     passwords = _passwords()
     oidc = _oidc_enabled()
+    allowed = _allowed_emails()
 
     if not passwords and not oidc:
         return True  # auth not configured -> open access (local dev default)
 
     _render_hero()
 
-    # ---- Layer 1: Google sign-in via Streamlit native OIDC ----
+    # ---- Google sign-in via Streamlit native OIDC ----
     if oidc:
         if _oidc_logged_in():
             email = _oidc_email()
-            allowed = _allowed_emails()
             if allowed and email not in allowed:
                 st.error(
                     f"{email or 'Your Google account'} is not on the access list. "
                     "Ask the administrator to add it to APP_ALLOWED_EMAILS."
                 )
-                if st.button("Sign out of Google", key="auth_google_deny"):
+                if st.button("Sign out", key="auth_google_deny"):
                     logout()
                     st.rerun()
                 return False
             st.session_state.auth_ok = True
             st.session_state.auth_user = email or "google-user"
             st.rerun()
-        else:
-            st.info("Sign in with your Google account to continue.")
-            try:
-                st.login()
-            except Exception as e:
-                # e.g. missing redirect_uri / cookie_secret in [auth]
-                st.error(f"Google sign-in could not start: {e}")
-                if not passwords:
-                    return False
-                st.warning("Falling back to password sign-in.")
+
+        # If password auth is ALSO configured, let the user pick a method so the
+        # Google button never hides the email + password + 2FA path.
+        if passwords:
+            method = st.radio(
+                "Sign in method",
+                ["Google account", "Email + Password (+2FA)"],
+                key="auth_method",
+                horizontal=True,
+            )
+            if method.startswith("Email"):
                 st.markdown("---")
                 return _password_form()
-            return False  # redirect initiated; Streamlit takes over
 
-    # ---- Layer 2: email + password (+ optional 2FA) ----
-    if not passwords:
-        return False
+        st.info("Sign in with your Google account to continue.")
+        try:
+            st.login()
+        except Exception as e:
+            # e.g. OIDC not fully configured (missing cookie_secret/redirect_uri)
+            st.error(f"Google sign-in could not start: {e}")
+            if not passwords:
+                return False
+            st.warning("Falling back to email + password sign-in.")
+            st.markdown("---")
+            return _password_form()
+        return False  # Google (only/selected) button shown; OIDC redirect follows
+
+    # ---- No Google: email + password (+ optional 2FA) ----
     return _password_form()
-
 
 def auth_badge_sidebar():
     """Tiny user badge + logout in the sidebar (call inside st.sidebar)."""

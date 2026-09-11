@@ -11,8 +11,12 @@ Secrets** (same format works in a local `.streamlit/secrets.toml` or `.env`).
 | 2b. TOTP 2FA | `APP_TOTP_SECRET` / `APP_TOTP_SECRETS` | extra 6-digit code field on the password form |
 | 3. Open access | *nothing set* ⚠️ | app is **open to anyone with the URL** (local dev default) |
 
-Precedence: Google OIDC wins when `[auth]` is present; the password form is a
-fallback if the OIDC redirect cannot start (e.g. wrong redirect URI).
+When **both** `[auth]` (Google) and `APP_PASSWORD` are set, the gate shows a
+method chooser — users pick **Google** *or* **Email + Password (+2FA)**, so the
+2FA path is never hidden behind the Google button. If only `[auth]` is set,
+Google is the sole method. If the OIDC redirect cannot start (e.g. wrong
+redirect URI) and a password is configured, the gate falls back to the
+password form automatically.
 
 ---
 
@@ -104,6 +108,8 @@ Users **without** an entry (and with no global `APP_TOTP_SECRET`) skip 2FA.
 
 ## Combos
 
+- Google + password + 2FA together: `[auth]` + `APP_PASSWORD` +
+  `APP_TOTP_SECRETS` → users choose Google **or** email+password+2FA at the gate.
 - Google + allowlist: `[auth]` + `APP_ALLOWED_EMAILS` → real Gmail identity,
   only listed people. (2FA is unnecessary here — Google enforces its own 2FA.)
 - Password + 2FA + per-user passwords: `APP_PASSWORD` (list) + `APP_TOTP_SECRETS`.
