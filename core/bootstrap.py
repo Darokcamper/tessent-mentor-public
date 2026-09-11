@@ -131,9 +131,19 @@ def _download_via_api(owner: str, repo: str, asset_id: int, token: str):
     req.add_header("Accept", "application/octet-stream")
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
-    with urllib.request.urlopen(req, timeout=600) as resp:
+    with urllib.request.urlopen(req, timeout=900) as resp:
         _log(f"API response status: {resp.status}")
-        return resp.read()
+        chunks = []
+        downloaded = 0
+        while True:
+            chunk = resp.read(2 * 1024 * 1024)  # 2MB chunking to prevent socket read timeouts
+            if not chunk:
+                break
+            chunks.append(chunk)
+            downloaded += len(chunk)
+            if len(chunks) % 25 == 0:
+                _log(f"downloaded {downloaded / 1e6:.1f} MB...")
+        return b"".join(chunks)
 
 
 def restore_knowledge() -> bool:
