@@ -139,15 +139,20 @@ def _download_via_api(owner: str, repo: str, asset_id: int, token: str):
 def restore_knowledge() -> bool:
     """Download + unpack the private bundle. Returns True when data is ready.
 
+    Concurrency-safe: Streamlit Cloud boots the app with several worker
+    processes that all run ui.py. A fast-path guard + an exclusive file lock
+    ensure the ~450 MB bundle is downloaded and extracted only ONCE per boot;
+    the other workers skip and reuse the restored data on their next session
+    (ui.py re-evaluates restore_done() per request).
+
     - No KB_BUNDLE_URL configured  -> skip silently (local dev has data already).
     - Already restored (or marker) -> skip.
     - Download/extract failure     -> log loudly, return False; app still boots.
     """
-    # Marker short-circuit: a completed restore must never re-download on the
-    # next boot, even if some optional files (e.g. exam json) were not in the
-    # bundle and restore_done() therefore reports "not fully ready".
+    # Fast path (no lock needed): a completed restore persists across processes.
     if MARKER.exists() or restore_done():
         return True
+
     kb_url = _get("KB_BUNDLE_URL")
     if not kb_url:
         _log("KB_BUNDLE_URL not set - skipping private knowledge restore")
@@ -158,6 +163,51 @@ def restore_knowledge() -> bool:
     if token:
         _log(f"token type: {'fine-grained' if token.startswith('github_pat_') else 'classic'} (len={len(token)})")
 
+    # Inter-process guard: prevent the bundle from being downloaded/extracted
+    # multiple times when Streamlit Cloud boots several worker processes.
+    lock_path = MARKER.parent / ".restore.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    lock_fd = None
+    have_lock = False
+    try:
+        import fcntl  # Linux/macOS (Streamlit Cloud is Linux).
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        have_lock = True
+    except (BlockingIOError, OSError):
+        have_lock = False  # another worker already holds the lock
+    except Exception:
+        have_lock = True   # fcntl unavailable (e.g. Windows dev): best-effort, no lock
+
+    try:
+        if not have_lock:
+            _log("restore already in progress by another process; skipping")
+            return False
+        # Re-check after acquiring the lock: the leader may have finished
+        # between our fast-path check and lock acquisition.
+        if MARKER.exists() or restore_done():
+            return True
+        return _do_restore(kb_url, token)
+    finally:
+        if lock_fd is not None:
+            try:
+                import fcntl
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                os.close(lock_fd)
+            except Exception:
+                pass
+
+
+def _do_restore(kb_url: str, token: str) -> bool:
+    """Parse the release URL, download the bundle via the GitHub API, and
+    extract it. The caller must hold the restore lock. Returns True when the
+    data is fully on disk."""
     # Parse the release URL to get owner, repo, tag, and asset name
     parsed = _parse_release_url(kb_url)
     if not parsed:
