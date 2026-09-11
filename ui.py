@@ -35,6 +35,7 @@ from core.rag_builder import upload_and_index_pdf, index_text_file
 from agents.attachment_agent import ask_with_text_attachment, ask_with_image
 from core.file_reader import document_text_to_string, is_text_ext, is_image_ext
 from core.auth import require_auth, auth_badge_sidebar, is_owner, owner_email
+from core.llm import GEMINI_KEYS as _LLM_GEMINI_KEYS
 from core.session_logger import (
     log_qa, log_qa_error, save_attachment,
     log_lab_explainer, log_lab_explainer_error,
@@ -130,18 +131,32 @@ with st.sidebar:
     )
 
     # Owner vs Guest Mode check
-    if is_owner():
+    backend_keys_ok = bool(_LLM_GEMINI_KEYS)
+
+    if is_owner() and backend_keys_ok:
         st.caption("👑 **Owner Mode**: Backend key rotation active")
-    else:
-        st.info("👤 **Guest Mode**: Enter your Gemini API key below:")
-        guest_key_input = st.text_input(
+    elif is_owner():
+        st.caption("👑 **Owner Mode** - no backend Gemini key is set. Enter one below or set "
+                   "GEMINI_API_KEY_1..6 in Settings -> Secrets.")
+        _key_input = st.text_input(
             "🔑 Gemini API Key",
             type="password",
             value=st.session_state.get("guest_api_key", ""),
-            help="Get your free key at https://aistudio.google.com/app/apikey"
+            help="Get your free key at https://aistudio.google.com/app/apikey",
         )
-        if guest_key_input:
-            st.session_state["guest_api_key"] = guest_key_input.strip()
+        if _key_input:
+            st.session_state["guest_api_key"] = _key_input.strip()
+    else:
+        st.info("👤 **Guest Mode**: Enter your Gemini API key below:")
+        _key_input = st.text_input(
+            "🔑 Gemini API Key",
+            type="password",
+            value=st.session_state.get("guest_api_key", ""),
+            help="Get your free key at https://aistudio.google.com/app/apikey",
+        )
+        if _key_input:
+            st.session_state["guest_api_key"] = _key_input.strip()
+
 
     st.markdown("---")
 
@@ -290,8 +305,10 @@ elif mode == "📖 Ask Question & Manual Citation":
     question = st.chat_input("Ask a Tessent Scan, ATPG, EDT, or TShell question...")
 
     if question:
-        if not is_owner() and not st.session_state.get("guest_api_key"):
-            st.error("🔑 Guest API key required. Please enter your free Gemini API key in the sidebar to ask questions.")
+        has_key = bool(_LLM_GEMINI_KEYS) or bool(st.session_state.get("guest_api_key"))
+        if not has_key:
+            st.error("🔑 No Gemini API key configured. Add one in the sidebar, or set "
+                     "GEMINI_API_KEY_1..6 (or GEMINI_API_KEY) in Settings -> Secrets.")
             st.stop()
 
         history = st.session_state.messages
