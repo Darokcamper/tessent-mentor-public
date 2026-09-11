@@ -9,12 +9,24 @@ load_dotenv()
 
 
 def _secret(name: str, default: str = "") -> str:
-    """Fetch a config value from env vars, then Streamlit secrets (mirrors core/auth.py)."""
+    """Fetch a config value from env vars, then Streamlit secrets (mirrors core/auth.py).
+
+    In Streamlit Cloud, st.secrets may not be populated until after auth, or may
+    not exist at all. We catch any exception and fall back cleanly. Also handle
+    the case where st.secrets is a dict-like object vs the newer Secrets API.
+    """
     val = os.getenv(name, "")
     if val:
         return val
     try:
-        return str(st.secrets.get(name, default))
+        # Handle both dict-style access and the newer st.secrets API
+        secrets = st.secrets
+        if secrets is None:
+            return default
+        if isinstance(secrets, dict):
+            return str(secrets.get(name, default))
+        # Newer Streamlit secrets API
+        return str(secrets.get(name, default))
     except Exception:
         return default
 
@@ -33,6 +45,12 @@ def _gemini_keys() -> list:
         single = _secret("GEMINI_API_KEY") or _secret("GOOGLE_API_KEY")
         if single:
             keys = [single]
+    # Debug: log how many keys we found (without exposing the keys themselves)
+    try:
+        import streamlit as st
+        st.toast(f"LLM: {len(keys)} Gemini key(s) loaded (env/secrets/BYOK)", icon="🔑")
+    except Exception:
+        pass
     return keys
 
 
