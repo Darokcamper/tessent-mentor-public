@@ -7,12 +7,37 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 load_dotenv()
 
-# Gather all 6 rotated Gemini keys from .env
-GEMINI_KEYS = [os.getenv(f"GEMINI_API_KEY_{i}") for i in range(1, 7) if os.getenv(f"GEMINI_API_KEY_{i}")]
-if not GEMINI_KEYS:
-    single_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if single_key:
-        GEMINI_KEYS = [single_key]
+
+def _secret(name: str, default: str = "") -> str:
+    """Fetch a config value from env vars, then Streamlit secrets (mirrors core/auth.py)."""
+    val = os.getenv(name, "")
+    if val:
+        return val
+    try:
+        return str(st.secrets.get(name, default))
+    except Exception:
+        return default
+
+
+def _gemini_keys() -> list:
+    """Collect Gemini keys from env/.env, then from Streamlit secrets.
+
+    Priority: GEMINI_API_KEY_1..6 (rotated), then a single GEMINI_API_KEY or
+    GOOGLE_API_KEY. Reading Streamlit secrets means owner-mode backend keys set
+    in the Streamlit Cloud Secrets panel also work on public deployments, not
+    just keys supplied via a local .env file.
+    """
+    keys = [_secret(f"GEMINI_API_KEY_{i}") for i in range(1, 7)]
+    keys = [k for k in keys if k]
+    if not keys:
+        single = _secret("GEMINI_API_KEY") or _secret("GOOGLE_API_KEY")
+        if single:
+            keys = [single]
+    return keys
+
+
+# Gather all 1-6 rotated Gemini keys (env/.env first, then Streamlit secrets).
+GEMINI_KEYS = _gemini_keys()
 
 if not GEMINI_KEYS:
     # In public or BYOK deployments, GEMINI_KEYS may be empty if the host does not provide server keys.

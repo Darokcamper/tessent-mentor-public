@@ -90,6 +90,11 @@ GEMINI_API_KEY_2=your_key_2
 ```
 A single `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) also works.
 
+> **Public/Streamlit Cloud:** the same keys work when set in the app's **Secrets**
+> panel (`Settings → Secrets`) instead of a local `.env` — `core/llm.py` checks
+> env vars, then `st.secrets`. This is how the public deploy supplies backend
+> keys for owner-mode inference (see the `toml` example below).
+
 ---
 
 ## 🗄️ Building the RAG Knowledge Base
