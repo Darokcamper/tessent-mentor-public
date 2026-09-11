@@ -2,18 +2,7 @@ from agents.base_agent import search_verified_notes
 from agents.attachment_context import get_attachment_context
 from core.llm import llm
 
-def ask_expert(question, persona_title, expertise_area, history=None, extra_context=None):
-    """
-    Generic expert agent helper function that retrieves Tessent manual chunks
-    via RAG search and returns a detailed answer, strictly grounded in the
-    retrieved manual context to prevent hallucination.
-
-    extra_context: optional string (e.g. text extracted from a user-attached
-    document). It is provided to the model as supplementary material clearly
-    labeled as a user attachment -- NOT as a manual citation source. The answer
-    must still be strictly grounded in the manual context and cite it; the
-    attachment is used to understand the user's specific question/context.
-    """
+def build_expert_prompt(question, persona_title, expertise_area, history=None, extra_context=None):
     # Retrieve relevant manual context
     context = search_verified_notes(question)
     if not context or not context.strip() or "No verified" in context.lower():
@@ -57,6 +46,33 @@ Instructions:
 3. If a specific detail is not supported by the context, say so instead of guessing.
 4. Structure your answer with clear headings, bullet points, and comparison tables where appropriate.
 """
+    return prompt
 
+def stream_expert(question, persona_title, expertise_area, history=None, extra_context=None):
+    """Generator yielding response tokens for real-time streaming."""
+    prompt = build_expert_prompt(question, persona_title, expertise_area, history, extra_context)
+    for chunk in llm.stream(prompt):
+        if hasattr(chunk, "content"):
+            content = chunk.content
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and "text" in part:
+                        yield part["text"]
+                    elif isinstance(part, str):
+                        yield part
+            elif isinstance(content, str):
+                yield content
+        else:
+            yield str(chunk)
+
+def ask_expert(question, persona_title, expertise_area, history=None, extra_context=None, stream=False):
+    """
+    Generic expert agent helper function that retrieves Tessent manual chunks
+    via RAG search and returns a detailed answer, strictly grounded in the
+    retrieved manual context to prevent hallucination.
+    """
+    if stream:
+        return stream_expert(question, persona_title, expertise_area, history, extra_context)
+    prompt = build_expert_prompt(question, persona_title, expertise_area, history, extra_context)
     response = llm.invoke(prompt)
     return response.content.strip()

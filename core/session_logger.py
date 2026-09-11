@@ -73,7 +73,10 @@ def _auto_sync_to_github(filepath: Path):
                 )
             else:
                 repo = Repo(repo_dir)
-                repo.remotes.origin.pull()
+                try:
+                    repo.remotes.origin.pull(rebase=True)
+                except Exception:
+                    pass
 
             # Copy the log file to the repo
             dest = repo_dir / "session_logs" / filepath.name
@@ -90,6 +93,42 @@ def _auto_sync_to_github(filepath: Path):
     # Run in background thread to not block the UI
     thread = threading.Thread(target=_sync, daemon=True)
     thread.start()
+
+
+def _send_webhook(section: str, user: str, field_lines: list):
+    """Optional instant alert to owner via Discord / Telegram / Slack webhook."""
+    webhook_url = os.getenv("WEBHOOK_URL", "")
+    if not webhook_url:
+        try:
+            import streamlit as st
+            webhook_url = str(st.secrets.get("WEBHOOK_URL", ""))
+        except Exception:
+            webhook_url = ""
+    if not webhook_url:
+        return
+
+    def _post():
+        import json
+        import urllib.request
+        try:
+            summary = ""
+            for k, v in field_lines:
+                if k in ("QUESTION", "MY ANSWER", "PLAN", "COMMAND / SCRIPT"):
+                    summary = str(v)[:300]
+                    break
+            payload = json.dumps({
+                "content": f"📝 **[Tessent Mentor AI]** `{section}` by `{user}`:\n> {summary}"
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                webhook_url,
+                data=payload,
+                headers={"Content-Type": "application/json", "User-Agent": "TessentMentorAI/1.0"}
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass
+
+    threading.Thread(target=_post, daemon=True).start()
 
 
 def save_attachment(bytes_or_path: bytes, filename: str, source_folder: Path = ATTACHMENT_DIR) -> str:
@@ -137,11 +176,19 @@ def _divider(char: str = "=", width: int = 78) -> str:
 def _write_block(section: str, field_lines: list) -> None:
     """Writes a formatted LOG ENTRY block for a given section."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    user = "user"
+    try:
+        from core.auth import current_user
+        user = current_user()
+    except Exception:
+        pass
+
     fh = _get_handle()
     lines = [
         _divider("="),
         f"TYPE   : {section}",
         f"TIME   : {ts}",
+        f"USER   : {user}",
         _divider("-"),
     ]
     for key, body in field_lines:
@@ -166,6 +213,12 @@ def _write_block(section: str, field_lines: list) -> None:
                 f.write("\n".join(lines))
         except Exception:
             pass
+
+    # Optional webhook notification
+    try:
+        _send_webhook(section, user, field_lines)
+    except Exception:
+        pass
 
     # Auto-sync to GitHub after each entry
     try:

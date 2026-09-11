@@ -34,7 +34,7 @@ from agents.exam_bank_agent import load_questions, get_questions_by_topic, get_t
 from core.rag_builder import upload_and_index_pdf, index_text_file
 from agents.attachment_agent import ask_with_text_attachment, ask_with_image
 from core.file_reader import document_text_to_string, is_text_ext, is_image_ext
-from core.auth import require_auth, auth_badge_sidebar
+from core.auth import require_auth, auth_badge_sidebar, is_owner, owner_email
 from core.session_logger import (
     log_qa, log_qa_error, save_attachment,
     log_lab_explainer, log_lab_explainer_error,
@@ -129,13 +129,35 @@ with st.sidebar:
         ]
     )
 
+    # Owner vs Guest Mode check
+    if is_owner():
+        st.caption("👑 **Owner Mode**: Backend key rotation active")
+    else:
+        st.info("👤 **Guest Mode**: Enter your Gemini API key below:")
+        guest_key_input = st.text_input(
+            "🔑 Gemini API Key",
+            type="password",
+            value=st.session_state.get("guest_api_key", ""),
+            help="Get your free key at https://aistudio.google.com/app/apikey"
+        )
+        if guest_key_input:
+            st.session_state["guest_api_key"] = guest_key_input.strip()
+
     st.markdown("---")
 
     # Always-visible logging status so the user knows every interaction is saved.
-    from core.session_logger import LOG_DIR
+    from core.session_logger import LOG_DIR, _AUTO_SYNC_ENABLED, _get_github_token
     st.markdown("### 📝 Session Logging")
     st.caption("✅ Active — everything you ask & every answer is saved.")
     st.caption(f"Folder: `{LOG_DIR}`")
+    
+    # Show sync status
+    token = _get_github_token()
+    if _AUTO_SYNC_ENABLED and token:
+        st.caption("🔄 **Auto-sync: ON** — logs sync to GitHub after each question")
+    elif _AUTO_SYNC_ENABLED:
+        st.caption("⚠️ **Auto-sync: OFF** — set GITHUB_TOKEN secret to enable")
+    
     try:
         log_files = sorted(LOG_DIR.glob("*.log"))
         if log_files:
@@ -268,6 +290,10 @@ elif mode == "📖 Ask Question & Manual Citation":
     question = st.chat_input("Ask a Tessent Scan, ATPG, EDT, or TShell question...")
 
     if question:
+        if not is_owner() and not st.session_state.get("guest_api_key"):
+            st.error("🔑 Guest API key required. Please enter your free Gemini API key in the sidebar to ask questions.")
+            st.stop()
+
         history = st.session_state.messages
         user_content = question
         if uploaded_file is not None:
@@ -338,11 +364,15 @@ elif mode == "📖 Ask Question & Manual Citation":
                             raise ValueError(
                                 f"Unsupported file type for '{fname}'. Supported: PDF, DOCX, PPTX, TXT, and image files."
                             )
+                        st.markdown(answer)
                     else:
                         agent = agent_map.get(topic, ask_general)
-                        answer = agent(question, history[:-1])
-
-                    st.markdown(answer)
+                        try:
+                            stream_gen = agent(question, history[:-1], stream=True)
+                            answer = st.write_stream(stream_gen)
+                        except (TypeError, Exception):
+                            answer = agent(question, history[:-1])
+                            st.markdown(answer)
                     st.session_state.messages.append({"role": "assistant", "content": answer})
                     if log_att_name:
                         st.caption(

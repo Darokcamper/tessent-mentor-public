@@ -128,6 +128,26 @@ def current_user() -> str:
     return "user"
 
 
+def owner_email() -> str:
+    return _get("APP_OWNER_EMAIL", "hazarh833@gmail.com").strip().lower()
+
+
+def is_owner() -> bool:
+    """True if the current session belongs to the owner, or if open access in local dev."""
+    passwords = _passwords()
+    oidc = _oidc_enabled()
+    if not passwords and not oidc:
+        return True  # local dev open mode is owner mode by default
+    u = current_user().strip().lower()
+    owner = owner_email()
+    if u and owner and u == owner:
+        return True
+    allowed = _allowed_emails()
+    if allowed and u == allowed[0]:
+        return True
+    return False
+
+
 def logout():
     """End the session (and the Google/OIDC session when present)."""
     st.session_state.auth_ok = False

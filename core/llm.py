@@ -15,14 +15,16 @@ if not GEMINI_KEYS:
         GEMINI_KEYS = [single_key]
 
 if not GEMINI_KEYS:
-    raise ValueError("No Gemini API keys found. Please check GEMINI_API_KEY_1..6 in .env file.")
+    # In public or BYOK deployments, GEMINI_KEYS may be empty if the host does not provide server keys.
+    GEMINI_KEYS = []
 
-MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-1.5-flash"]
+MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
 
 class RotatingGeminiLLM:
     """
     Production-grade LLM wrapper that rotates through 6 Gemini API keys and model fallbacks
     to prevent rate limits (429/TPD/RPM) and connection interruptions.
+    Also supports Bring-Your-Own-Key (BYOK) for guest users.
     """
     def __init__(self, max_retries: int = 6, initial_backoff: float = 2.0):
         self.max_retries = max_retries
@@ -30,8 +32,25 @@ class RotatingGeminiLLM:
         self.key_idx = 0
         self.model_idx = 0
 
-    def get_client(self):
-        key = GEMINI_KEYS[self.key_idx % len(GEMINI_KEYS)]
+    def get_client(self, custom_key: str = None):
+        # Check for user-provided key (BYOK)
+        if not custom_key:
+            try:
+                import streamlit as st
+                custom_key = str(st.session_state.get("guest_api_key", "")).strip()
+            except Exception:
+                custom_key = ""
+
+        if custom_key:
+            key = custom_key
+        elif GEMINI_KEYS:
+            key = GEMINI_KEYS[self.key_idx % len(GEMINI_KEYS)]
+        else:
+            raise ValueError(
+                "No Gemini API key available. Please enter your free Gemini API key in the sidebar "
+                "(get one at https://aistudio.google.com/app/apikey)."
+            )
+
         model = MODELS[self.model_idx % len(MODELS)]
         return ChatGoogleGenerativeAI(
             model=model,
@@ -56,14 +75,17 @@ class RotatingGeminiLLM:
             except Exception as e:
                 retries += 1
                 # Rotate key and fallback model on error or rate limit
-                self.key_idx = (self.key_idx + 1) % len(GEMINI_KEYS)
-                if retries % len(GEMINI_KEYS) == 0:
+                if GEMINI_KEYS:
+                    self.key_idx = (self.key_idx + 1) % len(GEMINI_KEYS)
+                    if retries % len(GEMINI_KEYS) == 0:
+                        self.model_idx = (self.model_idx + 1) % len(MODELS)
+                else:
                     self.model_idx = (self.model_idx + 1) % len(MODELS)
                     
                 if retries > self.max_retries:
                     raise e
                     
-                msg = f"Rotating API Key to Key {self.key_idx + 1} ({MODELS[self.model_idx]}). Retrying in {backoff:.1f}s..."
+                msg = f"Retrying with {MODELS[self.model_idx]} in {backoff:.1f}s..."
                 print(msg)
                 try:
                     st.toast(msg, icon="🔄")
@@ -82,8 +104,11 @@ class RotatingGeminiLLM:
                 return client.stream(*args, **kwargs)
             except Exception as e:
                 retries += 1
-                self.key_idx = (self.key_idx + 1) % len(GEMINI_KEYS)
-                if retries % len(GEMINI_KEYS) == 0:
+                if GEMINI_KEYS:
+                    self.key_idx = (self.key_idx + 1) % len(GEMINI_KEYS)
+                    if retries % len(GEMINI_KEYS) == 0:
+                        self.model_idx = (self.model_idx + 1) % len(MODELS)
+                else:
                     self.model_idx = (self.model_idx + 1) % len(MODELS)
                     
                 if retries > self.max_retries:
@@ -121,8 +146,11 @@ class RotatingGeminiLLM:
                 return raw_response
             except Exception as e:
                 retries += 1
-                self.key_idx = (self.key_idx + 1) % len(GEMINI_KEYS)
-                if retries % len(GEMINI_KEYS) == 0:
+                if GEMINI_KEYS:
+                    self.key_idx = (self.key_idx + 1) % len(GEMINI_KEYS)
+                    if retries % len(GEMINI_KEYS) == 0:
+                        self.model_idx = (self.model_idx + 1) % len(MODELS)
+                else:
                     self.model_idx = (self.model_idx + 1) % len(MODELS)
                 if retries > self.max_retries:
                     raise e

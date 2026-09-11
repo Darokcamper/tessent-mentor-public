@@ -220,13 +220,21 @@ _loaded_model = None
 _loaded_index = None
 _loaded_metadata = None
 
+def _init_sentence_transformer():
+    """Load SentenceTransformer from local cache first to avoid HuggingFace Hub network checks."""
+    try:
+        return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", local_files_only=True)
+    except Exception:
+        hf_token = os.getenv("HF_TOKEN", "")
+        if hf_token:
+            return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", token=hf_token)
+        return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
 # Eagerly load the model in the main thread during module import
 try:
-    print("Eagerly loading SentenceTransformer model in main thread to avoid Windows multi-threading deadlocks...")
-    _loaded_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-    print("SentenceTransformer model loaded successfully.")
+    _loaded_model = _init_sentence_transformer()
 except Exception as e:
-    print(f"Warning: Eager loading of SentenceTransformer failed: {e}")
+    print(f"Warning: Loading of SentenceTransformer failed: {e}")
     _loaded_model = None
 
 def load_rag():
@@ -240,7 +248,7 @@ def load_rag():
         
     if _loaded_model is None:
         try:
-            _loaded_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+            _loaded_model = _init_sentence_transformer()
         except Exception as e:
             print(f"Error loading SentenceTransformer: {e}")
             return False
