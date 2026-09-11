@@ -365,13 +365,14 @@ def retrieve_command_definition(command_name: str, source_filter: str = None, ma
 
 def retrieve(query, top_k=5, source_filter=None):
     """Retrieves top_k chunks matching the query, returning a list of dictionaries with source, page, text, and score."""
+    import re as _re  # local import to avoid scoping issues
     # If the query contains a Tessent command name (identifiers using underscores like
     # set_failure_mapping_options, add_clocks, create_patterns, ...), prefer the precise
     # command-dictionary block so the FULL Usage/option list is returned as one contiguous
     # excerpt instead of fragmented 1000-char chunks.
     # Require at least one underscore + a real command root to avoid grabbing plain words
     # like "set", "add", "get", "run" that appear in ordinary English queries.
-    cmd_hits = re.findall(r"\b(?:set|add|create|remove|delete|write|read|report|get|put|check|run|save|do|exit|source|define)_[a-z0-9_]+\b", query)
+    cmd_hits = _re.findall(r"\b(?:set|add|create|remove|delete|write|read|report|get|put|check|run|save|do|exit|source|define)_[a-z0-9_]+\b", query)
     if cmd_hits:
         # Only use precise lookup when the query is dominated by command name(s), to avoid
         # hijacking normal questions.
@@ -421,20 +422,20 @@ def retrieve(query, top_k=5, source_filter=None):
         for score, chunk in zip(scores, doc_chunks):
             boost = 0.0
             # Check for numbers in the query (e.g. "3", "4") matching rule headers (e.g. "3.", "4.")
-            for num in re.findall(r"\b\d+\b", query):
+            for num in _re.findall(r"\b\d+\b", query):
                 # Strong boost for slide headers starting with '# 3' or '# 4' or starting with '3.'
-                if re.search(r"#\s*" + num + r"\b", chunk["text"]):
+                if _re.search(r"#\s*" + num + r"\b", chunk["text"]):
                     boost += 1.2
-                elif re.search(r"^\s*" + num + r"\b[\.\-:]", chunk["text"]):
+                elif _re.search(r"^\s*" + num + r"\b[\.\-:]", chunk["text"]):
                     boost += 1.2
                 # Medium boost for rule numbers inside the text
-                elif re.search(r"\b" + num + r"\b[\.\-:]", chunk["text"]):
+                elif _re.search(r"\b" + num + r"\b[\.\-:]", chunk["text"]):
                     boost += 0.4
-                elif re.search(r"page\s+" + num + r"\b", chunk["text"].lower()):
+                elif _re.search(r"page\s+" + num + r"\b", chunk["text"].lower()):
                     boost += 0.4
                     
             # Check for specific technical terms in the query matching chunk text
-            query_words = [w.lower() for w in re.findall(r"\b[a-zA-Z]{3,}\b", query) if w.lower() not in ["what", "about", "from", "scan", "rule", "rules", "with", "this", "that", "they", "them"]]
+            query_words = [w.lower() for w in _re.findall(r"\b[a-zA-Z]{3,}\b", query) if w.lower() not in ["what", "about", "from", "scan", "rule", "rules", "with", "this", "that", "they", "them"]]
             for qw in query_words:
                 if qw in chunk["text"].lower():
                     boost += 0.1

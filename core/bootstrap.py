@@ -40,20 +40,93 @@ MARKER = KB_DIR / ".bootstrap_done"
 
 
 def _get(name: str, default: str = "") -> str:
-    """Fetch config from env vars, then Streamlit secrets (mirrors core/auth.py)."""
+    """Fetch config from env vars, then Streamlit secrets (mirrors core/auth.py).
+    
+    In Streamlit Cloud, st.secrets is only available during a user session,
+    not at import/build time. Uses direct indexing (most reliable) with fallback.
+    """
     val = os.getenv(name, "")
     if val:
         return val
     try:
         import streamlit as st
 
-        return str(st.secrets.get(name, default))
+        secrets = st.secrets
+        if secrets is None:
+            return default
+        # Try direct indexing first (most reliable across Streamlit versions)
+        try:
+            if isinstance(secrets, dict):
+                if name in secrets:
+                    return str(secrets[name])
+            else:
+                if name in secrets:
+                    return str(secrets[name])
+        except Exception:
+            pass
+        # Fallback to .get()
+        try:
+            val = secrets.get(name)
+            if val is not None:
+                return str(val)
+        except Exception:
+            pass
+        return default
     except Exception:
         return default
 
 
+def diagnose_secrets() -> dict:
+    """Return diagnostic info about secret availability for debugging.
+    
+    This helps identify why secrets might not be loading in Streamlit Cloud.
+    """
+    import streamlit as st
+    
+    info = {
+        "st.secrets type": str(type(st.secrets)),
+        "st.secrets is None": st.secrets is None,
+    }
+    
+    if st.secrets is not None:
+        if isinstance(st.secrets, dict):
+            info["secret keys"] = list(st.secrets.keys())
+        else:
+            # Try to get keys from the secrets object
+            try:
+                info["secret keys"] = list(st.secrets.keys())
+            except Exception as e:
+                info["secret keys error"] = str(e)
+    
+    # Check specific secrets we need
+    for key in ["GEMINI_API_KEY_1", "KB_BUNDLE_URL", "KB_BUNDLE_TOKEN"]:
+        val = _get(key)
+        info[f"{key} present"] = bool(val)
+    
+    return info
+
+
 def _log(msg: str) -> None:
     print(f"[bootstrap] {msg}", flush=True)
+
+
+def missing_secrets() -> list:
+    """Return a list of required secrets that are NOT configured.
+    
+    This is used by the UI to show exactly what needs to be set in
+    Streamlit Cloud's Secrets panel.
+    """
+    missing = []
+    required = [
+        ("GEMINI_API_KEY_1", "First Gemini API key (get free at https://aistudio.google.com/app/apikey)"),
+        ("KB_BUNDLE_URL", "Knowledge base bundle URL for RAG"),
+        ("KB_BUNDLE_TOKEN", "GitHub token for private knowledge base access"),
+    ]
+    for name, desc in required:
+        val = _get(name)
+        if not val:
+            missing.append((name, desc))
+    return missing
 
 
 def restore_done() -> bool:

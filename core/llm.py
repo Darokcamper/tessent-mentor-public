@@ -12,21 +12,35 @@ def _secret(name: str, default: str = "") -> str:
     """Fetch a config value from env vars, then Streamlit secrets (mirrors core/auth.py).
 
     In Streamlit Cloud, st.secrets may not be populated until after auth, or may
-    not exist at all. We catch any exception and fall back cleanly. Also handle
-    the case where st.secrets is a dict-like object vs the newer Secrets API.
+    not exist at all. We use direct indexing (most reliable) with fallback to .get().
     """
     val = os.getenv(name, "")
     if val:
         return val
     try:
-        # Handle both dict-style access and the newer st.secrets API
+        import streamlit as st
         secrets = st.secrets
         if secrets is None:
             return default
-        if isinstance(secrets, dict):
-            return str(secrets.get(name, default))
-        # Newer Streamlit secrets API
-        return str(secrets.get(name, default))
+        # Try direct indexing first (most reliable across Streamlit versions)
+        try:
+            if isinstance(secrets, dict):
+                if name in secrets:
+                    return str(secrets[name])
+            else:
+                # Streamlit Secrets object - try __contains__ then __getitem__
+                if name in secrets:
+                    return str(secrets[name])
+        except Exception:
+            pass
+        # Fallback to .get() method
+        try:
+            val = secrets.get(name)
+            if val is not None:
+                return str(val)
+        except Exception:
+            pass
+        return default
     except Exception:
         return default
 
@@ -54,12 +68,29 @@ def _gemini_keys() -> list:
     return keys
 
 
-# Gather all 1-6 rotated Gemini keys (env/.env first, then Streamlit secrets).
-GEMINI_KEYS = _gemini_keys()
+# Lazy-loaded Gemini keys cache. In Streamlit Cloud, st.secrets may not be
+# populated at import time, so we defer loading until first access.
+_GEMINI_KEYS_CACHE = None
 
-if not GEMINI_KEYS:
-    # In public or BYOK deployments, GEMINI_KEYS may be empty if the host does not provide server keys.
-    GEMINI_KEYS = []
+def get_gemini_keys() -> list:
+    """Lazily load and cache Gemini keys from env/.env or Streamlit secrets.
+    
+    This avoids import-time st.secrets access which can fail in Streamlit Cloud
+    before the secrets panel is fully initialized.
+    """
+    global _GEMINI_KEYS_CACHE
+    if _GEMINI_KEYS_CACHE is None:
+        _GEMINI_KEYS_CACHE = _gemini_keys()
+        if not _GEMINI_KEYS_CACHE:
+            _GEMINI_KEYS_CACHE = []
+    return _GEMINI_KEYS_CACHE
+
+# Legacy alias for backward compatibility - code that imports GEMINI_KEYS directly
+# will trigger lazy loading via __getattr__ on first access.
+def __getattr__(name):
+    if name == "GEMINI_KEYS":
+        return get_gemini_keys()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
 

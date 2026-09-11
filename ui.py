@@ -35,7 +35,7 @@ from core.rag_builder import upload_and_index_pdf, index_text_file
 from agents.attachment_agent import ask_with_text_attachment, ask_with_image
 from core.file_reader import document_text_to_string, is_text_ext, is_image_ext
 from core.auth import require_auth, auth_badge_sidebar, is_owner, owner_email
-from core.llm import GEMINI_KEYS as _LLM_GEMINI_KEYS
+from core.llm import get_gemini_keys as _get_gemini_keys
 from core.session_logger import (
     log_qa, log_qa_error, save_attachment,
     log_lab_explainer, log_lab_explainer_error,
@@ -50,17 +50,6 @@ from core.session_logger import (
 st.set_page_config(page_title="Tessent Mentor AI - Assessment Edition", page_icon="🧠", layout="wide")
 
 # =====================================
-# PRIVATE KNOWLEDGE BASE RESTORE (public-repo deploy)
-# If this deployment has no local knowledge base (e.g. the public code
-# repo on Streamlit Cloud), fetch the private bundle once from a GitHub
-# release. See core/bootstrap.py; no-op when data is already present.
-# =====================================
-from core.bootstrap import restore_done, restore_knowledge
-
-if not restore_done():
-    restore_knowledge()
-
-# =====================================
 # AUTH GATE (Google sign-in / password + 2FA / open)
 # Layered: [auth] OIDC in secrets -> Google sign-in; APP_PASSWORD -> email +
 # password (+ optional TOTP 2FA); nothing set -> open (local dev default).
@@ -68,6 +57,20 @@ if not restore_done():
 # =====================================
 if not require_auth():
     st.stop()
+
+# =====================================
+# PRIVATE KNOWLEDGE BASE RESTORE (public-repo deploy)
+# If this deployment has no local knowledge base (e.g. the public code
+# repo on Streamlit Cloud), fetch the private bundle once from a GitHub
+# release. See core/bootstrap.py; no-op when data is already present.
+# 
+# IMPORTANT: This MUST run AFTER auth because st.secrets is only populated
+# during a user session, not at import/build time.
+# =====================================
+from core.bootstrap import restore_done, restore_knowledge
+
+if not restore_done():
+    restore_knowledge()
 
 # =====================================
 # SESSION STATE
@@ -131,7 +134,7 @@ with st.sidebar:
     )
 
     # Owner vs Guest Mode check
-    backend_keys_ok = bool(_LLM_GEMINI_KEYS)
+    backend_keys_ok = bool(_get_gemini_keys())
 
     if is_owner() and backend_keys_ok:
         st.caption("👑 **Owner Mode**: Backend key rotation active")
@@ -157,6 +160,22 @@ with st.sidebar:
         if _key_input:
             st.session_state["guest_api_key"] = _key_input.strip()
 
+
+    st.markdown("---")
+
+    # Show missing secrets diagnostic panel
+    try:
+        from core.bootstrap import missing_secrets, restore_done
+        missing = missing_secrets()
+        if missing:
+            st.markdown("### ⚠️ Missing Secrets")
+            st.caption("Add these in Streamlit Cloud → Settings → Secrets:")
+            for name, desc in missing:
+                st.markdown(f"- **{name}**: {desc}")
+            if not restore_done():
+                st.caption("📚 Knowledge base not present — RAG will degrade gracefully")
+    except Exception:
+        pass
 
     st.markdown("---")
 
@@ -305,7 +324,7 @@ elif mode == "📖 Ask Question & Manual Citation":
     question = st.chat_input("Ask a Tessent Scan, ATPG, EDT, or TShell question...")
 
     if question:
-        has_key = bool(_LLM_GEMINI_KEYS) or bool(st.session_state.get("guest_api_key"))
+        has_key = bool(_get_gemini_keys()) or bool(st.session_state.get("guest_api_key"))
         if not has_key:
             st.error("🔑 No Gemini API key configured. Add one in the sidebar, or set "
                      "GEMINI_API_KEY_1..6 (or GEMINI_API_KEY) in Settings -> Secrets.")
