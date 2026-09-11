@@ -151,9 +151,10 @@ class RotatingGeminiLLM:
             except Exception as e:
                 retries += 1
                 # Rotate key and fallback model on error or rate limit
-                if GEMINI_KEYS:
-                    self.key_idx = (self.key_idx + 1) % len(GEMINI_KEYS)
-                    if retries % len(GEMINI_KEYS) == 0:
+                keys = get_gemini_keys()
+                if keys:
+                    self.key_idx = (self.key_idx + 1) % len(keys)
+                    if retries % len(keys) == 0:
                         self.model_idx = (self.model_idx + 1) % len(MODELS)
                 else:
                     self.model_idx = (self.model_idx + 1) % len(MODELS)
@@ -180,9 +181,10 @@ class RotatingGeminiLLM:
                 return client.stream(*args, **kwargs)
             except Exception as e:
                 retries += 1
-                if GEMINI_KEYS:
-                    self.key_idx = (self.key_idx + 1) % len(GEMINI_KEYS)
-                    if retries % len(GEMINI_KEYS) == 0:
+                keys = get_gemini_keys()
+                if keys:
+                    self.key_idx = (self.key_idx + 1) % len(keys)
+                    if retries % len(keys) == 0:
                         self.model_idx = (self.model_idx + 1) % len(MODELS)
                 else:
                     self.model_idx = (self.model_idx + 1) % len(MODELS)

@@ -365,14 +365,13 @@ def retrieve_command_definition(command_name: str, source_filter: str = None, ma
 
 def retrieve(query, top_k=5, source_filter=None):
     """Retrieves top_k chunks matching the query, returning a list of dictionaries with source, page, text, and score."""
-    import re as _re  # local import to avoid scoping issues
     # If the query contains a Tessent command name (identifiers using underscores like
     # set_failure_mapping_options, add_clocks, create_patterns, ...), prefer the precise
     # command-dictionary block so the FULL Usage/option list is returned as one contiguous
     # excerpt instead of fragmented 1000-char chunks.
     # Require at least one underscore + a real command root to avoid grabbing plain words
     # like "set", "add", "get", "run" that appear in ordinary English queries.
-    cmd_hits = _re.findall(r"\b(?:set|add|create|remove|delete|write|read|report|get|put|check|run|save|do|exit|source|define)_[a-z0-9_]+\b", query)
+    cmd_hits = re.findall(r"\b(?:set|add|create|remove|delete|write|read|report|get|put|check|run|save|do|exit|source|define)_[a-z0-9_]+\b", query)
     if cmd_hits:
         # Only use precise lookup when the query is dominated by command name(s), to avoid
         # hijacking normal questions.
