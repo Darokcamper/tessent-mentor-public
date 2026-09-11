@@ -117,13 +117,15 @@ class RotatingGeminiLLM:
 
         if custom_key:
             key = custom_key
-        elif GEMINI_KEYS:
-            key = GEMINI_KEYS[self.key_idx % len(GEMINI_KEYS)]
         else:
-            raise ValueError(
-                "No Gemini API key available. Please enter your free Gemini API key in the sidebar "
-                "(get one at https://aistudio.google.com/app/apikey)."
-            )
+            keys = get_gemini_keys()
+            if keys:
+                key = keys[self.key_idx % len(keys)]
+            else:
+                raise ValueError(
+                    "No Gemini API key available. Please enter your free Gemini API key in the sidebar "
+                    "(get one at https://aistudio.google.com/app/apikey)."
+                )
 
         model = MODELS[self.model_idx % len(MODELS)]
         return ChatGoogleGenerativeAI(
