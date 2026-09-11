@@ -108,6 +108,7 @@ pydantic_core==2.46.4
 pydeck==0.9.2
 Pygments==2.20.0
 PyMuPDF==1.27.2.3
+pyotp==2.9.0
 pypdfium2==5.10.1
 python-bidi==0.6.10
 python-dateutil==2.9.0.post0

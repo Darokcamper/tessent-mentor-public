@@ -60,9 +60,10 @@ if not restore_done():
     restore_knowledge()
 
 # =====================================
-# AUTH GATE (password + optional email allowlist)
-# Set APP_PASSWORD / APP_ALLOWED_EMAILS in .env or Streamlit secrets.
-# If APP_PASSWORD is unset, the app runs open (local dev default).
+# AUTH GATE (Google sign-in / password + 2FA / open)
+# Layered: [auth] OIDC in secrets -> Google sign-in; APP_PASSWORD -> email +
+# password (+ optional TOTP 2FA); nothing set -> open (local dev default).
+# See AUTH_SETUP.md.
 # =====================================
 if not require_auth():
     st.stop()
