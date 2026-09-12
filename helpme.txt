@@ -1,0 +1,148 @@
+================================================================================
+TESSENT & DFT EXPERT AI - PUBLIC DEPLOYMENT & OPERATIONAL GUIDE
+Folder: C:\Wipro\tessent-mentor-public (Public Deployment Repository)
+================================================================================
+
+This guide outlines deployment, configuration, and execution instructions for the
+publicly deployed Streamlit Cloud version of Tessent & DFT Expert AI.
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+1. Architecture Overview (Public Repo + Encrypted Knowledge Restore)
+2. Streamlit Cloud Deployment Setup
+3. Secrets Configuration Template (TOML)
+4. Local Execution (Python venv & Docker)
+5. Security & Multi-User Authentication Guide
+6. Troubleshooting & Health Diagnostics
+
+
+================================================================================
+1. ARCHITECTURE OVERVIEW
+================================================================================
+
+This repository contains the clean, public application code for Tessent & DFT Expert AI.
+To safeguard proprietary Siemens/Mentor reference manuals and slide images:
+- Proprietary PDFs, slide screenshots, and vector stores are NOT tracked in this repo.
+- During container startup, core/bootstrap.py securely downloads the pre-built
+  knowledge bundle (knowledge_bundle.zip) from the private release asset using
+  the fine-grained token provided in Streamlit Secrets.
+- Retrieval-Augmented Generation (RAG), Exam Bank, and Deep Study modes are restored
+  automatically upon boot without requiring manual PDF uploads.
+
+
+================================================================================
+2. STREAMLIT CLOUD DEPLOYMENT SETUP
+================================================================================
+
+Follow these steps to deploy this repository on Streamlit Community Cloud:
+
+1. Sign in to https://share.streamlit.io.
+2. Click "Create app" -> "From existing repo".
+3. Repository: <your-github-username>/tessent-mentor-public
+4. Branch: main
+5. Main file path: ui.py
+6. Advanced settings:
+   - Python version: 3.13
+7. In "Secrets", paste the configuration template from Section 3 below.
+8. Click "Deploy!".
+
+
+================================================================================
+3. SECRETS CONFIGURATION TEMPLATE
+================================================================================
+
+Paste the following block into Streamlit Cloud (App Settings -> Secrets):
+
+```toml
+# ==============================================================================
+# 1. ACCESS CONTROL & IDENTITIES
+# ==============================================================================
+APP_OWNER_EMAIL = "your_email@gmail.com"
+APP_ALLOWED_EMAILS = "your_email@gmail.com, colleague@wipro.com"
+
+# Per-User Passwords (format: email1=pwd1, email2=pwd2)
+APP_USERS = "your_email@gmail.com=YourStrongPassword123, colleague@wipro.com=ColleaguePassword456"
+
+# Fallback General Password
+APP_PASSWORD = "YourStrongPassword123"
+
+# Optional Per-User 2FA (TOTP)
+# APP_TOTP_SECRETS = "your_email@gmail.com=BASE32_KEY_HERE"
+
+# ==============================================================================
+# 2. STREAMLIT NATIVE GOOGLE AUTH (OIDC)
+# ==============================================================================
+[auth]
+redirect_uri = "https://<your-subdomain>.streamlit.app/oauth2callback"
+cookie_secret = "<generate_random_secret>"
+client_id = "<google_oauth_client_id>.apps.googleusercontent.com"
+client_secret = "<google_oauth_client_secret>"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+
+# ==============================================================================
+# 3. KNOWLEDGE BASE RESTORE & LOGGING
+# ==============================================================================
+# Fine-grained PAT with Contents: Read-only on the private repo
+KB_BUNDLE_TOKEN = "github_pat_<YOUR_FINE_GRAINED_PAT>"
+KB_BUNDLE_URL = "https://github.com/<owner>/<private_repo>/releases/download/v1/knowledge_bundle.zip"
+
+# Fine-grained PAT with Contents: Read & Write for session log auto-commit
+GITHUB_TOKEN = "github_pat_<YOUR_WRITE_SCOPED_PAT>"
+
+# ==============================================================================
+# 4. LLM API KEYS (ROTATED POOL)
+# ==============================================================================
+GEMINI_API_KEY_1 = "<YOUR_GEMINI_API_KEY_1>"
+GEMINI_API_KEY_2 = "<YOUR_GEMINI_API_KEY_2>"
+GEMINI_API_KEY_3 = "<YOUR_GEMINI_API_KEY_3>"
+GEMINI_API_KEY_4 = "<YOUR_GEMINI_API_KEY_4>"
+GEMINI_API_KEY_5 = "<YOUR_GEMINI_API_KEY_5>"
+GEMINI_API_KEY_6 = "<YOUR_GEMINI_API_KEY_6>"
+
+GROQ_API_KEY = "<YOUR_GROQ_API_KEY>"
+HF_TOKEN = "<YOUR_HF_TOKEN>"
+```
+
+
+================================================================================
+4. LOCAL EXECUTION (PYTHON VENV & DOCKER)
+================================================================================
+
+4.1 Running with Python Virtual Environment:
+    git clone https://github.com/<your-username>/tessent-mentor-public.git
+    cd tessent-mentor-public
+    python -m venv venv
+    .\venv\Scripts\activate
+    pip install -r requirements.txt
+    streamlit run ui.py
+
+4.2 Running with Docker:
+    docker build -t tessent-mentor-public .
+    docker run -p 8501:8501 --env-file .env tessent-mentor-public
+
+
+================================================================================
+5. SECURITY & MULTI-USER AUTHENTICATION GUIDE
+================================================================================
+
+- Google Sign-In: Users authenticated via Google OIDC are matched against
+  APP_ALLOWED_EMAILS. No password needed from users.
+- Email + Password: If APP_USERS is configured, each user logs in with their
+  specific password.
+- 2FA Protection: If a user has a TOTP key configured in APP_TOTP_SECRETS,
+  they must provide the time-based 6-digit code from Google Authenticator or Authy.
+
+
+================================================================================
+6. TROUBLESHOOTING & HEALTH DIAGNOSTICS
+================================================================================
+
+- Issue: App shows "Knowledge Base Missing".
+  Fix: Verify KB_BUNDLE_URL and KB_BUNDLE_TOKEN in Secrets. Check that the PAT
+  has "Contents: Read" permission on the private repository.
+- Issue: Hot-reload or import warnings.
+  Fix: ui.py incorporates resilient importlib reloads and fallback handlers.
+- Issue: Rate limits on LLM.
+  Fix: The application automatically cycles through the 6 Gemini API keys.
+================================================================================

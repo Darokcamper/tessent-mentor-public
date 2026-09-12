@@ -1,0 +1,83 @@
+================================================================================
+TESSENT & DFT EXPERT AI - PUBLIC RELEASE HISTORY & DEPLOYMENT LOGS
+Folder: C:\Wipro\tessent-mentor-public (Public Deployment Repository)
+================================================================================
+
+This document logs public deployment releases, features, architectural milestones,
+and operational guidelines for the Streamlit Community Cloud application.
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+1. Release Milestones & Changelog
+2. Production Deployment & Cloud Architecture
+3. Security & Clean Export Compliance
+4. Health Verification & System Tests
+
+
+================================================================================
+1. RELEASE MILESTONES & CHANGELOG
+================================================================================
+
+[Release 2.4.0] - 2026-09-12
+- Resilient Hot-Reloading: Added two-tier module reload handling in ui.py to eliminate
+  ImportError exceptions during live Streamlit Cloud hot-reloads.
+- Disambiguated Evaluators: Separated viva evaluation and exam quiz evaluation functions.
+- Context-Aware Query Rewriting: Preserves multi-turn conversation context for short
+  follow-up questions.
+- Hybrid Syntax & Semantic RAG: Blends exact Tessent command definitions with semantic
+  FAISS chunks.
+- Universal Telemetry: Session logging enabled across all 8 application modes.
+
+[Release 2.3.0] - 2026-09-11
+- Brand & UI Generalization: Modernized platform into a universal Tessent & DFT Expert AI
+  assistant suitable for real-world production engineering, labs, and interview prep.
+- Per-User Password Dictionaries: Added APP_USERS mapping enabling individual passwords
+  and independent revocation.
+- Per-User 2FA: Added APP_TOTP_SECRETS enabling selective Google Authenticator / Authy.
+
+[Release 2.2.0] - 2026-09-10
+- Multi-Worker Concurrency Protection: Integrated fcntl.flock file locking during boot
+  restore to eliminate duplicate 424 MB bundle downloads by competing worker processes.
+- GitHub API Endpoint Streaming: Resolved private repository PAT asset downloads via
+  direct GitHub API Bearer token routing.
+
+[Release 2.1.0] - 2026-09-09
+- Public-Private Cloud Architecture: Established clean repository split allowing public
+  Streamlit deployment while securing proprietary technical manuals.
+- Deep Study Diagram Vision: Restored multimodal analysis for circuit schematics.
+
+
+================================================================================
+2. PRODUCTION DEPLOYMENT & CLOUD ARCHITECTURE
+================================================================================
+
+- Platform: Streamlit Community Cloud (Python 3.13)
+- Live Web Application: https://tessent-mentor-public-chvdernxyfme5vmcxt3uvd.streamlit.app/
+- High Availability Boot Flow:
+  1. Container boots with Python dependencies.
+  2. core/bootstrap.py detects presence of knowledge base.
+  3. If missing, requests knowledge_bundle.zip from GitHub API using fine-grained PAT.
+  4. Automatically unpacks indices, exam banks, and lecture transcripts.
+  5. App initializes BGE-small embedding model and launches UI in <2 seconds on warm boot.
+
+
+================================================================================
+3. SECURITY & CLEAN EXPORT COMPLIANCE
+================================================================================
+
+- Clean Repository Audit: tools/make_public_repo.py enforces a strict leak-scan
+  preventing any .pdf, .png, .srt, .pkl, or raw .index files from entering git history.
+- Secret Hygiene: All credentials, API keys, and client secrets are exclusively
+  injected at runtime via Streamlit Secrets (secrets.toml). No production secrets
+  exist in repository source code.
+
+
+================================================================================
+4. HEALTH VERIFICATION & SYSTEM TESTS
+================================================================================
+
+- Routing Latency: < 0.001s for fast regex keywords (boundary scan, scan chain, atpg).
+- RAG Query Response Time: ~1.2s - 2.5s (blended semantic search + LLM generation).
+- Memory Footprint: ~650 MB RSS during active inference.
+================================================================================
