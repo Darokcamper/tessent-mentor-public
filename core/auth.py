@@ -31,9 +31,8 @@ import streamlit as st
 def _get(name: str, default: str = "") -> str:
     """Fetch a config value from env vars, then Streamlit secrets.
     
-    Uses direct key indexing (most reliable) with multiple fallbacks because
-    st.secrets on Streamlit Cloud does not always support .get() and may raise
-    AttributeError or StreamlitAPIException depending on the version.
+    Searches both the top-level secrets dictionary AND any nested sections
+    (such as when variables are placed after [auth] in secrets.toml).
     """
     val = os.getenv(name, "")
     if val:
@@ -42,16 +41,46 @@ def _get(name: str, default: str = "") -> str:
         secrets = st.secrets
         if secrets is None:
             return default
-        # Try direct indexing first — most reliable on Streamlit Cloud
+        # 1. Direct top-level check
         try:
             if name in secrets:
-                return str(secrets[name])
+                v = secrets[name]
+                if not isinstance(v, (dict, list)):
+                    return str(v)
         except Exception:
             pass
-        # Fallback: .get() method
+        # 2. Case-insensitive top-level check
+        try:
+            for k in secrets:
+                if str(k).lower() == name.lower():
+                    v = secrets[k]
+                    if not isinstance(v, (dict, list)):
+                        return str(v)
+        except Exception:
+            pass
+        # 3. Search nested sections (e.g. if variables were written under [auth])
+        try:
+            for k in secrets:
+                sub = secrets[k]
+                if isinstance(sub, dict) or hasattr(sub, "items"):
+                    try:
+                        if name in sub:
+                            v = sub[name]
+                            if not isinstance(v, (dict, list)):
+                                return str(v)
+                        for sk in sub:
+                            if str(sk).lower() == name.lower():
+                                v = sub[sk]
+                                if not isinstance(v, (dict, list)):
+                                    return str(v)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # 4. Fallback: .get() method
         try:
             v = secrets.get(name)
-            if v is not None:
+            if v is not None and not isinstance(v, (dict, list)):
                 return str(v)
         except Exception:
             pass
@@ -86,22 +115,30 @@ def _totp_secrets() -> dict:
 
 
 def _oidc_enabled() -> bool:
-    """True when Streamlit native auth is configured ([auth] in secrets)."""
+    """True when Streamlit native auth is configured ([auth] in secrets with client credentials)."""
     try:
         secrets = st.secrets
         if secrets is None:
             return False
-        # st.secrets["auth"] is a sub-dict when [auth] section exists in TOML
+        auth_sec = None
         try:
             if "auth" in secrets:
-                return bool(secrets["auth"])
+                auth_sec = secrets["auth"]
         except Exception:
             pass
-        try:
-            v = secrets.get("auth", None)
-            return bool(v)
-        except Exception:
-            pass
+        if auth_sec is None:
+            try:
+                auth_sec = secrets.get("auth")
+            except Exception:
+                pass
+        if auth_sec and (isinstance(auth_sec, dict) or hasattr(auth_sec, "get")):
+            # Must actually have Google OIDC credentials, not just random variables
+            try:
+                cid = auth_sec.get("client_id", "")
+                ruri = auth_sec.get("redirect_uri", "")
+                return bool(cid or ruri)
+            except Exception:
+                return True
         return False
     except Exception:
         return False

@@ -48,8 +48,8 @@ MARKER = KB_DIR / ".bootstrap_done"
 def _get(name: str, default: str = "") -> str:
     """Fetch config from env vars, then Streamlit secrets (mirrors core/auth.py).
     
-    In Streamlit Cloud, st.secrets is only available during a user session,
-    not at import/build time. Uses direct indexing (most reliable) with fallback.
+    Searches both top-level secrets AND any nested sections (such as when variables
+    are placed after [auth] in secrets.toml).
     """
     val = os.getenv(name, "")
     if val:
@@ -60,21 +60,47 @@ def _get(name: str, default: str = "") -> str:
         secrets = st.secrets
         if secrets is None:
             return default
-        # Try direct indexing first (most reliable across Streamlit versions)
+        # 1. Direct top-level check
         try:
-            if isinstance(secrets, dict):
-                if name in secrets:
-                    return str(secrets[name])
-            else:
-                if name in secrets:
-                    return str(secrets[name])
+            if name in secrets:
+                v = secrets[name]
+                if not isinstance(v, (dict, list)):
+                    return str(v)
         except Exception:
             pass
-        # Fallback to .get()
+        # 2. Case-insensitive top-level check
         try:
-            val = secrets.get(name)
-            if val is not None:
-                return str(val)
+            for k in secrets:
+                if str(k).lower() == name.lower():
+                    v = secrets[k]
+                    if not isinstance(v, (dict, list)):
+                        return str(v)
+        except Exception:
+            pass
+        # 3. Search nested sections (e.g. if variables were written under [auth])
+        try:
+            for k in secrets:
+                sub = secrets[k]
+                if isinstance(sub, dict) or hasattr(sub, "items"):
+                    try:
+                        if name in sub:
+                            v = sub[name]
+                            if not isinstance(v, (dict, list)):
+                                return str(v)
+                        for sk in sub:
+                            if str(sk).lower() == name.lower():
+                                v = sub[sk]
+                                if not isinstance(v, (dict, list)):
+                                    return str(v)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # 4. Fallback: .get() method
+        try:
+            v = secrets.get(name)
+            if v is not None and not isinstance(v, (dict, list)):
+                return str(v)
         except Exception:
             pass
         return default
