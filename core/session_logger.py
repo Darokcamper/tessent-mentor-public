@@ -38,13 +38,38 @@ _AUTO_SYNC_REMOTE = "origin"
 
 
 def _get_github_token():
-    """Get GitHub token from environment or Streamlit secrets."""
-    token = os.getenv("GITHUB_TOKEN", "")
+    """Get GitHub token from environment or Streamlit secrets (top-level or nested)."""
+    token = os.getenv("GITHUB_TOKEN", "") or os.getenv("KB_BUNDLE_TOKEN", "")
     if token:
         return token
     try:
         import streamlit as st
-        return str(st.secrets.get("GITHUB_TOKEN", ""))
+        secrets = st.secrets
+        if secrets is None:
+            return ""
+        # 1. Direct top-level check
+        for name in ("GITHUB_TOKEN", "KB_BUNDLE_TOKEN", "GH_TOKEN"):
+            try:
+                if name in secrets and not isinstance(secrets[name], (dict, list)):
+                    return str(secrets[name]).strip()
+            except Exception:
+                pass
+        # 2. Check inside sub-sections (e.g. if written under [auth])
+        for k in secrets:
+            sub = secrets[k]
+            if isinstance(sub, dict) or hasattr(sub, "items"):
+                for name in ("GITHUB_TOKEN", "KB_BUNDLE_TOKEN", "GH_TOKEN"):
+                    try:
+                        if name in sub and not isinstance(sub[name], (dict, list)):
+                            return str(sub[name]).strip()
+                    except Exception:
+                        pass
+        # 3. Dynamic scan for token string pattern
+        for k in secrets:
+            v = str(secrets[k]).strip()
+            if v.startswith("github_pat_") or v.startswith("ghp_"):
+                return v
+        return ""
     except Exception:
         return ""
 
