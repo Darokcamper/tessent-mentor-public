@@ -19,3 +19,7 @@ session_logs/
 *.log
 dist/
 _bootstrap_done*
+
+# IDE settings
+.vscode/
+.idea/
