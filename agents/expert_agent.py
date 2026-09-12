@@ -19,7 +19,7 @@ def build_expert_prompt(question, persona_title, expertise_area, history=None, e
 
     # Retrieve relevant manual context
     context = search_verified_notes(retrieval_query)
-    if not context or not context.strip() or "No verified" in context.lower():
+    if not context or not context.strip() or any(t in context.lower() for t in ["no verified", "no matching", "not found", "error"]):
         context = "<NO MANUAL CONTEXT WAS RETRIEVED>"
 
     attachment_block = ""

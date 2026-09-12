@@ -231,16 +231,19 @@ def list_verified_sources():
     try:
         sources = []
         csv_path = KNOWLEDGE_DIR / "sources.csv"
-        if not csv_path.exists():
-            return "Error: sources.csv catalog not found."
-            
-        with open(csv_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if row.get("File"):
-                    file_path = Path(row["File"])
-                    sources.append(f"- Stem: '{file_path.stem}', Topic: '{row.get('Topic', 'Unknown')}', Source: '{row.get('Source', 'Unknown')}'")
-        return "\n".join(sources)
+        if csv_path.exists():
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row.get("File"):
+                        file_path = Path(row["File"])
+                        sources.append(f"- Stem: '{file_path.stem}', Topic: '{row.get('Topic', 'Unknown')}', Source: '{row.get('Source', 'Unknown')}'")
+        if not sources and TXT_DIR.exists():
+            for txt_file in sorted(TXT_DIR.glob("*.txt")):
+                stem = txt_file.stem
+                category = "Official Manual" if ("atpg_gd" in stem or "tshell" in stem or "lib" in stem or "lab" in stem) else "Video Lecture / Slide Transcript"
+                sources.append(f"- Stem: '{stem}', Category: '{category}'")
+        return "\n".join(sources) if sources else "No verified source documents currently indexed."
     except Exception as e:
         return f"Error listing sources: {e}"
 
@@ -253,26 +256,12 @@ def search_verified_notes(query: str, source_filter: str = None):
             source_filter = None
             
     try:
-        k = 8 if source_filter else 4
+        k = 8
         results = retrieve(query, top_k=k, source_filter=source_filter)
         if not results:
             if source_filter:
-                return (
-                    f"No matching chunks found in verified notes for source_filter='{source_filter}'. "
-                    "That file stem may be wrong. Call list_verified_sources() to get valid file stems, "
-                    "then retry search_verified_notes with a corrected filter or without one. "
-                    "IMPORTANT: Do NOT answer from your own pre-trained knowledge. If a corrected search "
-                    "still finds nothing, your Final Answer MUST be: 'I do not have the exact answer in my "
-                    "verified source documents.' followed by the mandated source-file list and refinement suggestions."
-                )
-            return (
-                "No matching chunks found in verified notes. "
-                "IMPORTANT: Do NOT answer from your own pre-trained knowledge. Try rephrasing the query with "
-                "different key technical terms (e.g. expand acronyms), or call list_verified_sources() "
-                "to see available files. If searches still find nothing relevant, your Final Answer MUST be: "
-                "'I do not have the exact answer in my verified source documents.' followed by the mandated "
-                "source-file list and refinement suggestions."
-            )
+                return f"No matching chunks found in verified notes for source_filter='{source_filter}'."
+            return "No matching chunks found in verified notes for this query."
             
         parts = []
         for r in results:

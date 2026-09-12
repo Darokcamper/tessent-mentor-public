@@ -463,14 +463,37 @@ def retrieve(query, top_k=5, source_filter=None):
             })
         return results
 
-    # Global search when no source filter is specified
-    scores, indices = _loaded_index.search(query_vector, top_k)
+    # Global search when no source filter is specified: retrieve candidate pool and rerank
+    candidate_k = min(len(_loaded_metadata), max(top_k * 4, 32))
+    scores, indices = _loaded_index.search(query_vector, candidate_k)
     
-    results = []
+    candidates = []
     for score, idx in zip(scores[0], indices[0]):
         if idx < 0 or idx >= len(_loaded_metadata):
             continue
         chunk = _loaded_metadata[idx]
+        text = chunk.get("text", "")
+        src = chunk.get("source", "").lower()
+        
+        boost = 0.0
+        # Boost substantive explanatory paragraphs (transcripts & detailed explanations)
+        if len(text.strip()) > 180:
+            boost += 0.15
+        if "subs__" in src:
+            boost += 0.25  # rich video lesson transcripts with complete technical walkthroughs
+        if any(m in src for m in ["atpg_gd", "tshell_ref", "tshell_user", "tessent_lib", "lab_wkbk"]):
+            boost += 0.15  # official reference manual chapters
+        # Penalize near-empty screenshot slide title stubs that lack body text
+        if len(text.strip()) < 120 and "screenshot" in text.lower():
+            boost -= 0.30
+            
+        final_score = float(score) + boost
+        candidates.append((final_score, chunk))
+        
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    
+    results = []
+    for score, chunk in candidates[:top_k]:
         results.append({
             "source": chunk["source"],
             "page": chunk["page"],
