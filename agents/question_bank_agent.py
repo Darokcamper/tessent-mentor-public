@@ -25,14 +25,14 @@ def generate_assessment_question_bank(module: str, num_questions: int = 20) -> s
 4. If the context does not cover a category, say so instead of fabricating questions.
 5. Never rely on generic background knowledge for specific command options or behaviors.
 
-You are a Lead Tessent POC Assessor.
-Generate a comprehensive {num_questions}-question Assessment & Viva Bank for the module: **{module}**.
+You are a Principal Tessent DFT Architect and Senior Technical Interviewer.
+Generate a comprehensive {num_questions}-question Technical Interview & Viva Bank for the module: **{module}**.
 
 Reference Context from Tessent Manuals:
 {context_text}
 
 Requirements:
-1. Generate exactly {num_questions} high-yield viva questions commonly asked by POCs during lab evaluation,
+1. Generate exactly {num_questions} high-yield technical viva questions commonly asked in DFT interviews and lab evaluations,
    grounded ONLY in the reference context provided.
 2. Structure the questions across 4 key categories:
    - Category A: Command Rationale & Flow Placement
@@ -40,8 +40,8 @@ Requirements:
    - Category C: DRC Rules, Failures & Missing Command Scenarios
    - Category D: Output Artifacts, Reports & Pattern Verification
 3. For EVERY question, provide:
-   - **Question**: Clear, direct POC question.
-   - **Why It Is Asked**: What concept the POC is testing.
+   - **Question**: Clear, direct technical question.
+   - **Why It Is Asked**: Core engineering concept being tested.
    - **Benchmark Model Answer**: Grounded ONLY in the context, with a [Source: <file>, Page <N>] citation.
    - **Manual Citation**: Relevant manual/section reference from the context.
 

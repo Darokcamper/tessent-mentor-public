@@ -38,33 +38,31 @@ Requirements:
 IMPORTANT:
 
 If Topic is SCAN, possible concepts include:
-scan chain,
-scan enable,
-scan flop,
-controllability,
-observability,
-shift mode,
-capture mode,
-lockup latch,
-clock mixing,
-scan stitching,
-scan compression,
-scan architecture,
-scan diagnosis,
-scan debugging.
+scan chain, scan enable, scan flop, controllability, observability, shift mode, capture mode, lockup latch, clock mixing, scan stitching, scan compression, scan architecture, scan diagnosis, scan debugging.
 
 If Topic is ATPG, possible concepts include:
-stuck-at faults,
-transition faults,
-fault coverage,
-test coverage,
-fault simulation,
-pattern generation,
-test points,
-X-filling,
-dynamic compaction,
-static compaction,
-ATPG debugging.
+stuck-at faults, transition faults, path delay faults, fault coverage, test coverage, fault simulation, pattern generation, test points, X-filling, dynamic compaction, static compaction, atpg constraints, ATPG debugging.
+
+If Topic is EDT, possible concepts include:
+TestKompress, decompressor, compactor, scan channels, compression ratio, EDT bypass mode, mask registers, spatial vs temporal compaction, channel capacity, EDT controller, low-power EDT.
+
+If Topic is MBIST, possible concepts include:
+March C-, March A, address generator, data generator, comparator, BIST controller, SRAM testing, BISR (Built-In Self Repair), eFuse, memory retention test, word-line / bit-line faults.
+
+If Topic is JTAG or BOUNDARYSCAN, possible concepts include:
+IEEE 1149.1, TAP controller 16-state machine, TMS/TCK/TDI/TDO, Instruction Register (IR), Boundary Scan Register (BSR), BYPASS, IDCODE, EXTEST, SAMPLE/PRELOAD, INTEST, board-level interconnect testing.
+
+If Topic is IJTAG, possible concepts include:
+IEEE 1687, SIB (Segment Insertion Bit), ICL (Instrument Connectivity Language), PDL (Procedural Description Language), variable-length scan paths, instrument integration.
+
+If Topic is OCC, possible concepts include:
+On-Chip Clock controller, fast capture clock pulses, PLL clock switching, at-speed launch-off-shift (LOS) vs launch-off-capture (LOC), clock gating, clock domain crossing in test mode.
+
+If Topic is STA, possible concepts include:
+setup and hold timing in scan shift vs capture mode, clock skew impact, lockup latch timing calculation, false paths, multi-cycle paths, scan enable timing closure.
+
+If Topic is TCL or LINUX, possible concepts include:
+Tessent Shell (tshell) environment, dofile scripting, reporting commands (report_scan_chains, report_atpg_processes), environment variables, log file parsing, regex in TCL, batch execution.
 
 Choose a concept NOT already used.
 """

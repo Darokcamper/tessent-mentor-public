@@ -34,6 +34,10 @@ ROUTER_PATTERNS = [
     ("WRAPPER", [
         r"\b1500\b", r"\bcore wrapper\b", r"\bwrapper chain\b", r"\bwdr\b", r"\bwir\b"
     ]),
+    ("BOUNDARYSCAN", [
+        r"\bboundary\s*scan\b", r"\bbsr\b", r"\bboundary\s*scan\s*cell\b",
+        r"\bextest\b", r"\bsample_preload\b", r"\bintest\b"
+    ]),
     ("OCC", [
         r"\bocc\b", r"\bon-chip clock\b", r"\bcapture clock\b", r"\bat-speed clock\b",
         r"\bclock control definition\b", r"\bccds?\b"

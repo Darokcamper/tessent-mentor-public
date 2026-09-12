@@ -224,8 +224,8 @@ python tools/regen_exam_json.py
 # 3. re-pack so the fresh exam data is included
 python tools/pack_knowledge.py --force
 
-# 4. export a clean public repo folder (code only, no knowledge data)
-python tools/make_public_repo.py --dest C:\path\to\tessent-mentor-public
+# 4. export/sync to the public repo folder (code only, no knowledge data)
+python tools/make_public_repo.py --dest C:\Wipro\tessent-mentor-public --force
 ```
 
 Then:

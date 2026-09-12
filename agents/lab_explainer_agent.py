@@ -78,8 +78,8 @@ Using ONLY the excerpts above, provide a structured markdown response covering:
 ### 5. What Happens If Skipped / Common Failures
 - ONLY error messages or behaviors present in the excerpts. Otherwise state they are not specified.
 
-### 6. Top 5 POC Viva Questions & Model Answers
-- 5 realistic POC questions. Answers MUST be grounded only in the excerpts, each with a
+### 6. Top 5 Technical Interview & Viva Questions with Model Answers
+- 5 realistic technical interview questions. Answers MUST be grounded only in the excerpts, each with a
   [Source: <file>, Page <N>] citation.
 
 ### 7. Manual Citations

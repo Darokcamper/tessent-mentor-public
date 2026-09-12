@@ -30,6 +30,9 @@ class TestVLSIAgents(unittest.TestCase):
         
         topic_sta = route_question("What is clock skew and setup time violation?")
         self.assertEqual(topic_sta, "STA")
+
+        topic_bsr = route_question("What is the boundary scan register and EXTEST instruction?")
+        self.assertEqual(topic_bsr, "BOUNDARYSCAN")
         
     def test_expert_agent_fallback(self):
         """Test expert agent execution and response grounding."""

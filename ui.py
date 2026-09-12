@@ -282,16 +282,16 @@ if mode == "📤 Upload Manuals & Labs":
     st.markdown("---")
     st.markdown("### 📁 Manual Directory Upload Guide")
     st.markdown("""
-    You can also copy your PDF manual files directly into your project directory on your computer:
-    - **Shell User Manual:** `C:\\Wipro\\vlsi-mentor-ai\\knowledge\\01_Tessent_Shell_User_Manual\\`
-    - **Shell Reference Manual:** `C:\\Wipro\\vlsi-mentor-ai\\knowledge\\02_Tessent_Shell_Reference_Manual\\`
-    - **ATPG & Scan User Manual:** `C:\\Wipro\\vlsi-mentor-ai\\knowledge\\03_Scan_and_ATPG_User_Manual\\`
-    - **Library User Manual:** `C:\\Wipro\\vlsi-mentor-ai\\knowledge\\04_Library_User_Manual\\`
-    - **Scan & ATPG Lab Manual:** `C:\\Wipro\\vlsi-mentor-ai\\knowledge\\05_Scan_and_ATPG_Lab_Manual\\`
+    You can also copy your PDF manual files directly into your project knowledge directory:
+    - **Shell User Manual:** `knowledge/01_Tessent_Shell_User_Manual/`
+    - **Shell Reference Manual:** `knowledge/02_Tessent_Shell_Reference_Manual/`
+    - **ATPG & Scan User Manual:** `knowledge/03_Scan_and_ATPG_User_Manual/`
+    - **Library User Manual:** `knowledge/04_Library_User_Manual/`
+    - **Scan & ATPG Lab Manual:** `knowledge/05_Scan_and_ATPG_Lab_Manual/`
 
-    After copying PDFs directly into those folders, run the re-indexing command in PowerShell:
-    ```powershell
-    .\\venv\\Scripts\\python.exe core/rag_builder.py build
+    After copying PDFs directly into those folders, run the re-indexing command:
+    ```bash
+    python core/rag_builder.py build
     ```
     """)
 
