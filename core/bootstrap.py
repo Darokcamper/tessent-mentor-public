@@ -32,6 +32,12 @@ import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 KB_DIR = PROJECT_ROOT / "knowledge"
 SENTINEL = KB_DIR / "vectorstore" / "faiss_index.index"
@@ -106,6 +112,29 @@ def diagnose_secrets() -> dict:
     return info
 
 
+DEFAULT_KB_BUNDLE_URL = "https://github.com/Darokcamper/tessent_ai/releases/download/v1/knowledge_bundle.zip"
+
+
+def _get_github_token() -> str:
+    """Fetch GitHub token for private release download. Checks KB_BUNDLE_TOKEN, GITHUB_TOKEN, GH_TOKEN."""
+    token = _get("KB_BUNDLE_TOKEN") or _get("GITHUB_TOKEN") or _get("GH_TOKEN")
+    if token:
+        return token
+    # Scan secrets for any key that looks like a github token
+    try:
+        import streamlit as st
+        secrets = st.secrets
+        if secrets:
+            for k in secrets:
+                if "GITHUB" in k.upper() or "TOKEN" in k.upper():
+                    v = str(secrets[k]).strip()
+                    if v.startswith("github_pat_") or v.startswith("ghp_"):
+                        return v
+    except Exception:
+        pass
+    return ""
+
+
 def _log(msg: str) -> None:
     print(f"[bootstrap] {msg}", flush=True)
 
@@ -117,15 +146,28 @@ def missing_secrets() -> list:
     Streamlit Cloud's Secrets panel.
     """
     missing = []
-    required = [
-        ("GEMINI_API_KEY_1", "First Gemini API key (get free at https://aistudio.google.com/app/apikey)"),
-        ("KB_BUNDLE_URL", "Knowledge base bundle URL for RAG"),
-        ("KB_BUNDLE_TOKEN", "GitHub token for private knowledge base access"),
-    ]
-    for name, desc in required:
-        val = _get(name)
-        if not val:
-            missing.append((name, desc))
+    
+    # Check Gemini key
+    has_gemini = any(_get(f"GEMINI_API_KEY_{i}") for i in range(1, 7)) or bool(_get("GEMINI_API_KEY") or _get("GOOGLE_API_KEY"))
+    if not has_gemini:
+        try:
+            import streamlit as st
+            if st.secrets:
+                for k, v in st.secrets.items():
+                    if ("GEMINI" in k.upper() or "GOOGLE" in k.upper()) and str(v).strip():
+                        has_gemini = True
+                        break
+        except Exception:
+            pass
+    if not has_gemini:
+        missing.append(("GEMINI_API_KEY_1", "Gemini API key (get free at https://aistudio.google.com/app/apikey)"))
+
+    # Check knowledge base token only if KB is not yet restored
+    if not restore_done():
+        has_token = bool(_get_github_token())
+        if not has_token:
+            missing.append(("GITHUB_TOKEN", "GitHub PAT token with read access to private repo to download knowledge bundle"))
+
     return missing
 
 
@@ -164,7 +206,7 @@ def _resolve_latest_tag(owner: str, repo: str) -> str:
     req = urllib.request.Request(api_url)
     req.add_header("Accept", "application/vnd.github+json")
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
-    token = _get("KB_BUNDLE_TOKEN")
+    token = _get_github_token()
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
@@ -176,13 +218,14 @@ def _resolve_latest_tag(owner: str, repo: str) -> str:
         return ""
 
 
-def _get_asset_id(owner: str, repo: str, tag: str, asset_name: str):
+def _get_asset_id(owner: str, repo: str, tag: str, asset_name: str, token: str = ""):
     """Get the asset ID for a release asset via GitHub API."""
     api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
     req = urllib.request.Request(api_url)
     req.add_header("Accept", "application/vnd.github+json")
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
-    token = _get("KB_BUNDLE_TOKEN")
+    if not token:
+        token = _get_github_token()
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -228,7 +271,7 @@ def restore_knowledge() -> bool:
     the other workers skip and reuse the restored data on their next session
     (ui.py re-evaluates restore_done() per request).
 
-    - No KB_BUNDLE_URL configured  -> skip silently (local dev has data already).
+    - No KB_BUNDLE_URL configured  -> defaults to Darokcamper/tessent_ai release v1.
     - Already restored (or marker) -> skip.
     - Download/extract failure     -> log loudly, return False; app still boots.
     """
@@ -236,15 +279,14 @@ def restore_knowledge() -> bool:
     if MARKER.exists() or restore_done():
         return True
 
-    kb_url = _get("KB_BUNDLE_URL")
-    if not kb_url:
-        _log("KB_BUNDLE_URL not set - skipping private knowledge restore")
+    kb_url = _get("KB_BUNDLE_URL") or DEFAULT_KB_BUNDLE_URL
+    token = _get_github_token()
+    if not token:
+        _log("no GitHub token found (checked KB_BUNDLE_TOKEN, GITHUB_TOKEN, GH_TOKEN) - cannot download private knowledge base")
         return False
 
-    token = _get("KB_BUNDLE_TOKEN")
     _log(f"downloading bundle: {kb_url}")
-    if token:
-        _log(f"token type: {'fine-grained' if token.startswith('github_pat_') else 'classic'} (len={len(token)})")
+    _log(f"token type: {'fine-grained' if token.startswith('github_pat_') else 'classic'} (len={len(token)})")
 
     # Inter-process guard: prevent the bundle from being downloaded/extracted
     # multiple times when Streamlit Cloud boots several worker processes.

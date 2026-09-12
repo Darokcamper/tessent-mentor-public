@@ -59,12 +59,20 @@ def _gemini_keys() -> list:
         single = _secret("GEMINI_API_KEY") or _secret("GOOGLE_API_KEY")
         if single:
             keys = [single]
-    # Debug: log how many keys we found (without exposing the keys themselves)
-    try:
-        import streamlit as st
-        st.toast(f"LLM: {len(keys)} Gemini key(s) loaded (env/secrets/BYOK)", icon="🔑")
-    except Exception:
-        pass
+    if not keys:
+        # Fallback: dynamically scan st.secrets for any Gemini/Google API key
+        try:
+            import streamlit as st
+            secrets = st.secrets
+            if secrets is not None:
+                for k in secrets:
+                    k_upper = str(k).upper()
+                    if "GEMINI" in k_upper or ("GOOGLE" in k_upper and "KEY" in k_upper):
+                        val = str(secrets[k]).strip()
+                        if val and val not in keys:
+                            keys.append(val)
+        except Exception:
+            pass
     return keys
 
 
