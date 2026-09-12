@@ -89,14 +89,55 @@ def _get(name: str, default: str = "") -> str:
         return default
 
 
+def _user_passwords() -> dict:
+    """Parse per-user password mappings (e.g. 'user1@wipro.com=pass1, user2@gmail.com=pass2').
+    
+    Can be configured in APP_USERS, APP_USER_PASSWORDS, or as email=password in APP_PASSWORD.
+    """
+    out = {}
+    for var in ("APP_USERS", "APP_USER_PASSWORDS", "APP_PASSWORDS", "APP_PASSWORD"):
+        raw = _get(var, "")
+        for pair in raw.split(","):
+            pair = pair.strip()
+            if "=" in pair and "@" in pair:
+                u, p = pair.split("=", 1)
+                u = u.strip().lower()
+                p = p.strip()
+                if u and p:
+                    out[u] = p
+            elif ":" in pair and "@" in pair:
+                u, p = pair.split(":", 1)
+                u = u.strip().lower()
+                p = p.strip()
+                if u and p:
+                    out[u] = p
+    return out
+
+
 def _passwords() -> list:
+    """List of general/pool passwords (excluding per-user mappings)."""
     raw = _get("APP_PASSWORD") or _get("APP_PASSWORDS", "")
-    return [p.strip() for p in raw.split(",") if p.strip()]
+    pwds = []
+    for p in raw.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        if ("=" in p and "@" in p) or (":" in p and "@" in p):
+            continue
+        pwds.append(p)
+    if not pwds and _user_passwords():
+        return list(_user_passwords().values())
+    return pwds
 
 
 def _allowed_emails() -> list:
     raw = _get("APP_ALLOWED_EMAILS", "")
-    return [e.strip().lower() for e in raw.split(",") if e.strip()]
+    emails = [e.strip().lower() for e in raw.split(",") if e.strip()]
+    # Auto-include any users defined with dedicated passwords
+    for u in _user_passwords():
+        if u not in emails:
+            emails.append(u)
+    return emails
 
 
 def _totp_secrets() -> dict:
@@ -264,7 +305,15 @@ def _password_form():
         return False
 
     email_clean = (email or "").strip().lower()
-    pwd_ok = any(hmac.compare_digest((pwd or "").strip(), p) for p in _passwords())
+    user_pwds = _user_passwords()
+
+    # Check dedicated password if defined for this user, else check shared pool
+    if email_clean in user_pwds:
+        pwd_ok = hmac.compare_digest((pwd or "").strip(), user_pwds[email_clean])
+    else:
+        general_pwds = [p for p in _passwords() if p not in user_pwds.values()] or _passwords()
+        pwd_ok = any(hmac.compare_digest((pwd or "").strip(), p) for p in general_pwds)
+
     email_ok = (not allowed) or (email_clean in allowed)
     totp_ok = _verify_totp(email_clean, code or "")
 
