@@ -77,13 +77,20 @@ def get_gemini_keys() -> list:
     
     This avoids import-time st.secrets access which can fail in Streamlit Cloud
     before the secrets panel is fully initialized.
+    
+    IMPORTANT: We only cache a NON-EMPTY result. If no keys are found (e.g.
+    because st.secrets was not yet accessible at import time), we leave the
+    cache as None so that the next call retries — this ensures that once the
+    Streamlit session is fully initialized and secrets are available, the keys
+    are picked up automatically without needing an app restart.
     """
     global _GEMINI_KEYS_CACHE
-    if _GEMINI_KEYS_CACHE is None:
-        _GEMINI_KEYS_CACHE = _gemini_keys()
-        if not _GEMINI_KEYS_CACHE:
-            _GEMINI_KEYS_CACHE = []
-    return _GEMINI_KEYS_CACHE
+    if _GEMINI_KEYS_CACHE:  # Only trust a non-empty cached result
+        return _GEMINI_KEYS_CACHE
+    keys = _gemini_keys()
+    if keys:
+        _GEMINI_KEYS_CACHE = keys  # Cache only on success
+    return keys or []
 
 
 # Back-compat constant alias. NOTE: plain module constants bind at IMPORT time,

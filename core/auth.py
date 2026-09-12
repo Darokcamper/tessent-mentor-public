@@ -29,12 +29,33 @@ import streamlit as st
 
 
 def _get(name: str, default: str = "") -> str:
-    """Fetch a config value from env vars, then Streamlit secrets."""
+    """Fetch a config value from env vars, then Streamlit secrets.
+    
+    Uses direct key indexing (most reliable) with multiple fallbacks because
+    st.secrets on Streamlit Cloud does not always support .get() and may raise
+    AttributeError or StreamlitAPIException depending on the version.
+    """
     val = os.getenv(name, "")
     if val:
         return val
     try:
-        return str(st.secrets.get(name, default))
+        secrets = st.secrets
+        if secrets is None:
+            return default
+        # Try direct indexing first — most reliable on Streamlit Cloud
+        try:
+            if name in secrets:
+                return str(secrets[name])
+        except Exception:
+            pass
+        # Fallback: .get() method
+        try:
+            v = secrets.get(name)
+            if v is not None:
+                return str(v)
+        except Exception:
+            pass
+        return default
     except Exception:
         return default
 
@@ -67,7 +88,21 @@ def _totp_secrets() -> dict:
 def _oidc_enabled() -> bool:
     """True when Streamlit native auth is configured ([auth] in secrets)."""
     try:
-        return bool(st.secrets.get("auth", None))
+        secrets = st.secrets
+        if secrets is None:
+            return False
+        # st.secrets["auth"] is a sub-dict when [auth] section exists in TOML
+        try:
+            if "auth" in secrets:
+                return bool(secrets["auth"])
+        except Exception:
+            pass
+        try:
+            v = secrets.get("auth", None)
+            return bool(v)
+        except Exception:
+            pass
+        return False
     except Exception:
         return False
 
@@ -248,31 +283,44 @@ def require_auth() -> bool:
             st.session_state.auth_user = email or "google-user"
             st.rerun()
 
-        # If password auth is ALSO configured, let the user pick a method so the
-        # Google button never hides the email + password + 2FA path.
+        # If BOTH Google (OIDC) and password auth are configured, always show a
+        # method radio FIRST so the user actively picks. Only trigger st.login()
+        # after the user selects "Google account" AND clicks the Sign-In button.
+        # This prevents an immediate OAuth redirect on page load.
         if passwords:
             method = st.radio(
                 "Sign in method",
-                ["Google account", "Email + Password (+2FA)"],
+                ["Email + Password (+2FA)", "Google account"],
                 key="auth_method",
                 horizontal=True,
             )
             if method.startswith("Email"):
                 st.markdown("---")
                 return _password_form()
-
-        st.info("Sign in with your Google account to continue.")
-        try:
-            st.login()
-        except Exception as e:
-            # e.g. OIDC not fully configured (missing cookie_secret/redirect_uri)
-            st.error(f"Google sign-in could not start: {e}")
-            if not passwords:
+            else:
+                # Google method selected — show an explicit button before redirecting
+                st.markdown("---")
+                st.info("Click below to sign in with your Google account.")
+                if st.button("🔐 Sign in with Google", key="auth_google_btn", use_container_width=True):
+                    try:
+                        st.login()
+                    except Exception as e:
+                        st.error(f"Google sign-in could not start: {e}")
+                        st.warning("Falling back to email + password sign-in.")
+                        st.markdown("---")
+                        return _password_form()
                 return False
-            st.warning("Falling back to email + password sign-in.")
-            st.markdown("---")
-            return _password_form()
-        return False  # Google (only/selected) button shown; OIDC redirect follows
+
+        # Only OIDC (no password fallback): show sign-in button
+        st.info("Sign in with your Google account to continue.")
+        if st.button("🔐 Sign in with Google", key="auth_google_only_btn", use_container_width=True):
+            try:
+                st.login()
+            except Exception as e:
+                # e.g. OIDC not fully configured (missing cookie_secret/redirect_uri)
+                st.error(f"Google sign-in could not start: {e}")
+                return False
+        return False  # Wait for user to click the button
 
     # ---- No Google: email + password (+ optional 2FA) ----
     return _password_form()
