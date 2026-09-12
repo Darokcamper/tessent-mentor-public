@@ -1,6 +1,7 @@
 import os
 import time
 import base64
+import streamlit as st
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -84,6 +85,13 @@ def get_gemini_keys() -> list:
             _GEMINI_KEYS_CACHE = []
     return _GEMINI_KEYS_CACHE
 
+
+# Back-compat constant alias. NOTE: plain module constants bind at IMPORT time,
+# which breaks on Streamlit Cloud because st.secrets is not populated yet at
+# that point. Accessing the value goes through get_gemini_keys() at RUNTIME
+# instead, so keep this alias EMPTY and never fill it.
+GEMINI_KEYS: list = []
+
 # Legacy alias for backward compatibility - code that imports GEMINI_KEYS directly
 # will trigger lazy loading via __getattr__ on first access.
 def __getattr__(name):
@@ -164,7 +172,6 @@ class RotatingGeminiLLM:
                 msg = f"Retrying with {MODELS[self.model_idx]} in {backoff:.1f}s..."
                 print(msg)
                 try:
-                    import streamlit as st
                     st.toast(msg, icon="🔄")
                 except Exception:
                     pass
@@ -224,17 +231,15 @@ class RotatingGeminiLLM:
                 return raw_response
             except Exception as e:
                 retries += 1
-                keys = get_gemini_keys()
-                if keys:
-                    self.key_idx = (self.key_idx + 1) % len(keys)
-                    if retries % len(keys) == 0:
+                if GEMINI_KEYS:
+                    self.key_idx = (self.key_idx + 1) % len(GEMINI_KEYS)
+                    if retries % len(GEMINI_KEYS) == 0:
                         self.model_idx = (self.model_idx + 1) % len(MODELS)
                 else:
                     self.model_idx = (self.model_idx + 1) % len(MODELS)
                 if retries > self.max_retries:
                     raise e
                 try:
-                    import streamlit as st
                     st.toast(f"Rotating API Key for vision (retry {retries})...", icon="🔄")
                 except Exception:
                     pass

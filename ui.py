@@ -35,7 +35,17 @@ from core.rag_builder import upload_and_index_pdf, index_text_file
 from agents.attachment_agent import ask_with_text_attachment, ask_with_image
 from core.file_reader import document_text_to_string, is_text_ext, is_image_ext
 from core.auth import require_auth, auth_badge_sidebar, is_owner, owner_email
-from core.llm import get_gemini_keys as _get_gemini_keys
+try:
+    from core.llm import get_gemini_keys as _get_gemini_keys
+except ImportError:
+    # Older deployed core/llm.py may only expose GEMINI_KEYS list.
+    from core.llm import GEMINI_KEYS as _LLM_STATIC_KEYS  # noqa: F401
+
+    def _get_gemini_keys():  # type: ignore[no-redef]
+        try:
+            return list(_LLM_STATIC_KEYS or [])
+        except Exception:
+            return []
 from core.session_logger import (
     log_qa, log_qa_error, save_attachment,
     log_lab_explainer, log_lab_explainer_error,
