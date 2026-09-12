@@ -82,8 +82,12 @@ def ask_with_image(question, image_bytes, image_name, history=None, _topic=None)
     ext = image_name.lower().rsplit(".", 1)[-1]
     mime = MIME_MAP.get("." + ext, "image/png")
 
-    # Ground with manual context
-    results = retrieve(question, top_k=6)
+    # Ground with manual context: augment query with topic if question is brief or generic
+    search_q = question
+    if topic and topic != "GENERAL" and len(question.split()) < 8:
+        search_q = f"{topic} {question}"
+
+    results = retrieve(search_q, top_k=6)
     if results:
         context_parts = []
         for r in results:
@@ -93,6 +97,19 @@ def ask_with_image(question, image_bytes, image_name, history=None, _topic=None)
         context = "\n\n---\n\n".join(context_parts)
     else:
         context = "<NO MANUAL CONTEXT WAS RETRIEVED>"
+
+    history_block = ""
+    if history:
+        history_lines = []
+        for msg in history[-4:]:
+            role = "User" if msg.get("role") == "user" else "Assistant"
+            text = str(msg.get("content", "")).strip()
+            if len(text) > 400:
+                text = text[:400] + "..."
+            if text:
+                history_lines.append(f"{role}: {text}")
+        if history_lines:
+            history_block = "\n\nRecent Conversation History:\n" + "\n".join(history_lines)
 
     prompt = f"""GROUNDING RULES (MANDATORY):
 1. Answer ONLY from the "Reference Context" provided below.
@@ -106,9 +123,10 @@ def ask_with_image(question, image_bytes, image_name, history=None, _topic=None)
    error message, lab slide, or screenshot) to understand the user's question, but you must
    NOT present image-derived content as a manual citation. Cite only the Reference Context.
 
-You are a Senior Tessent DFT Engineer.
+You are a Senior Tessent DFT Engineer specializing in {topic}.
 Reference Context from Tessent Manuals & Verified Notes:
 {context}
+{history_block}
 
 The user's question (alongside the attached image) is:
 {question}

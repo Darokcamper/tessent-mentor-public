@@ -3,8 +3,22 @@ from agents.attachment_context import get_attachment_context
 from core.llm import llm
 
 def build_expert_prompt(question, persona_title, expertise_area, history=None, extra_context=None):
+    # Context-aware query rewriting for follow-ups (prevents losing context on queries like 'why?' or 'what about 3 and 4')
+    retrieval_query = question.strip()
+    followup_words = ["it", "this", "that", "they", "these", "those", "why", "how", "what about", "what if", "explain", "elaborate", "tell me more"]
+    q_lower = question.lower()
+    q_words = q_lower.split()
+
+    if history and (len(q_words) <= 6 or any(w in q_words for w in followup_words)):
+        for msg in reversed(history):
+            if msg.get("role") == "user":
+                prev_text = msg.get("content", "").split("\n\n[📎 Attached:")[0].strip()
+                if prev_text:
+                    retrieval_query = f"{prev_text} {question}"
+                break
+
     # Retrieve relevant manual context
-    context = search_verified_notes(question)
+    context = search_verified_notes(retrieval_query)
     if not context or not context.strip() or "No verified" in context.lower():
         context = "<NO MANUAL CONTEXT WAS RETRIEVED>"
 
@@ -20,6 +34,23 @@ def build_expert_prompt(question, persona_title, expertise_area, history=None, e
             "--- END ATTACHMENT ---"
         )
 
+    history_block = ""
+    if history:
+        history_lines = []
+        for msg in history[-4:]:
+            role = "User" if msg.get("role") == "user" else "Assistant"
+            text = str(msg.get("content", "")).strip()
+            if len(text) > 400:
+                text = text[:400] + "..."
+            if text:
+                history_lines.append(f"{role}: {text}")
+        if history_lines:
+            history_block = "\n\nRecent Conversation History:\n" + "\n".join(history_lines)
+
+    expertise_block = ""
+    if expertise_area and expertise_area.strip():
+        expertise_block = f"\nCore Domain Focus:\n{expertise_area.strip()}\n"
+
     prompt = f"""GROUNDING RULES (MANDATORY):
 1. Answer ONLY from the "Reference Context" provided below.
 2. Do NOT invent commands, options, arguments, errors, or file types not present in the context.
@@ -32,10 +63,11 @@ def build_expert_prompt(question, persona_title, expertise_area, history=None, e
    the user's specific scenario, but you must not present attachment content as if it came
    from a Tessent manual. Cite only the Reference Context.
 
-You are an expert {persona_title} specializing in Tessent DFT workflows.
+You are an expert {persona_title} specializing in Tessent DFT workflows.{expertise_block}
 Reference Context from Tessent Manuals & Verified Notes:
 {context}
 {attachment_block}
+{history_block}
 
 Question / Issue:
 {question}
@@ -45,6 +77,7 @@ Instructions:
 2. Cite each supporting fact with [Source: <file>, Page <N>].
 3. If a specific detail is not supported by the context, say so instead of guessing.
 4. Structure your answer with clear headings, bullet points, and comparison tables where appropriate.
+5. If this question is a follow-up, maintain conversational continuity while strictly grounding technical facts in the Reference Context.
 """
     return prompt
 

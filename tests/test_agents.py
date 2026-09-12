@@ -50,5 +50,21 @@ class TestVLSIAgents(unittest.TestCase):
         self.assertIn("Strengths", plan)
         self.assertIn("Weak", plan)
 
+    def test_evaluators_no_collision(self):
+        """Verify viva evaluator (string question) and exam evaluator (dict question) work without collisions."""
+        from agents.evaluator_agent import evaluate_answer as eval_viva
+        from agents.exam_bank_agent import evaluate_answer as eval_exam
+
+        # Exam evaluator accepts dict question
+        exam_q = {"num": 1, "text": "Sample", "correct": ["Option A"], "options": ["Option A", "Option B"]}
+        res_exam = eval_exam(exam_q, "Option A")
+        self.assertTrue(res_exam["correct"])
+        self.assertIn("Correct", res_exam["feedback"])
+
+        # Viva evaluator accepts string question and returns text
+        res_viva = eval_viva("What is a lockup latch?", "It is placed between different clock domains to prevent hold violations.")
+        self.assertIsNotNone(res_viva)
+        self.assertIn("Score", res_viva)
+
 if __name__ == "__main__":
     unittest.main()

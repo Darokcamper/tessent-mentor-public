@@ -351,7 +351,22 @@ def log_deep_study(kind: str, module: str, item: str, content: str) -> None:
     """Logs a deep-study report for a video lesson or lab exercise."""
     tag = "VIDEO" if kind == "video" else "LAB"
     _write_block("DEEP STUDY - " + tag, [
-        ("MODULE", module),
-        ("ITEM", item),
+        ("MODULE", str(module)),
+        ("ITEM", str(item)),
         ("CONTENT", content),
     ])
+
+
+def log_exam_quiz(topic: str, score: int, total: int, pct: float, details: list = None) -> None:
+    """Logs an exam bank quiz attempt with score and details."""
+    fields = [
+        ("TOPIC", topic or "All"),
+        ("SCORE", f"{score}/{total} ({pct:.1f}%)"),
+    ]
+    if details:
+        detail_lines = []
+        for q_num, user_ans, is_correct in details:
+            status = "CORRECT" if is_correct else "INCORRECT"
+            detail_lines.append(f"Q{q_num}: {user_ans} [{status}]")
+        fields.append(("ANSWERS", "\n".join(detail_lines)))
+    _write_block("EXAM QUIZ ATTEMPT", fields)

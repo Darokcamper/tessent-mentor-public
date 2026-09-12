@@ -18,7 +18,7 @@ from agents.tcl_agent import ask_tcl
 from agents.general_agent import ask_general
 
 from agents.interviewer_agent import ask_interview_question
-from agents.evaluator_agent import evaluate_answer
+from agents.evaluator_agent import evaluate_answer as evaluate_viva_answer
 from agents.planner_agent import generate_study_plan
 from agents.lab_explainer_agent import explain_lab_command
 from agents.question_bank_agent import generate_assessment_question_bank
@@ -30,7 +30,7 @@ from agents.deep_study_agent import (
     generate_lab_ppt_from_report, generate_lesson_ppt_from_report,
 )
 from agents.crossref_agent import crossref_lab, where_used, format_crossref_table
-from agents.exam_bank_agent import load_questions, get_questions_by_topic, get_topics, format_question, format_quiz, evaluate_answer
+from agents.exam_bank_agent import load_questions, get_questions_by_topic, get_topics, format_question, format_quiz, evaluate_answer as evaluate_exam_answer
 from core.rag_builder import upload_and_index_pdf, index_text_file
 from agents.attachment_agent import ask_with_text_attachment, ask_with_image
 from core.file_reader import document_text_to_string, is_text_ext, is_image_ext
@@ -51,7 +51,7 @@ from core.session_logger import (
     log_lab_explainer, log_lab_explainer_error,
     log_question_bank,
     log_viva_question, log_viva_answer_and_evaluation,
-    log_study_plan,
+    log_study_plan, log_deep_study, log_exam_quiz,
 )
 
 # =====================================
@@ -533,7 +533,7 @@ elif mode == "🎤 Interactive Viva Practice":
         if st.button("Submit Answer for Evaluation", use_container_width=True):
             if candidate_answer.strip():
                 with st.spinner("Grading response against Tessent Reference Manual criteria..."):
-                    result = evaluate_answer(st.session_state["interview_question"], candidate_answer)
+                    result = evaluate_viva_answer(st.session_state["interview_question"], candidate_answer)
                     st.session_state["evaluation"] = result
                     st.session_state.evaluations.append(result)
                     log_viva_answer_and_evaluation(
@@ -633,7 +633,9 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
             if sel_lesson == "Whole module (all lessons)":
                 if st.button("🎥 Generate Deep Study Report", key="ds_video_btn", use_container_width=True):
                     with st.spinner("Reading transcript, slides and manuals... (this can take a minute)"):
-                        st.session_state["ds_video_report_" + str(sel_num)] = explain_video_lesson(sel_num)
+                        v_rep = explain_video_lesson(sel_num)
+                        st.session_state["ds_video_report_" + str(sel_num)] = v_rep
+                        log_deep_study("video", str(sel_num), "Whole Module", v_rep)
                 cached_video = st.session_state.get("ds_video_report_" + str(sel_num))
                 if cached_video:
                     st.markdown(cached_video)
@@ -665,6 +667,7 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
                         st.session_state[cache_key] = report
                         st.session_state[ppt_key] = ppt_path
                         st.session_state[dia_key] = dia
+                        log_deep_study("video", str(sel_num), sel_lesson, report)
                 cached_lesson = st.session_state.get(cache_key)
                 if cached_lesson:
                     # Layman's explanation expander
@@ -753,6 +756,7 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
                     st.session_state[lab_cache_key] = report
                     st.session_state[lab_ppt_key] = ppt_path
                     st.session_state[lab_dia_key] = dia
+                    log_deep_study("lab", sel_lab, "Exercise", report)
             
             cached_lab = st.session_state.get(lab_cache_key)
             if cached_lab:
@@ -904,13 +908,17 @@ elif mode == "📝 Exam Question Bank (Real Questions)":
                     if ua is None:
                         continue
                     total += 1
-                    result = evaluate_answer(q, ua)
+                    result = evaluate_exam_answer(q, ua)
                     if result['correct']:
                         score += 1
                     results.append((q, ua, result))
 
                 if total > 0:
                     pct = (score / total) * 100
+                    log_exam_quiz(
+                        sel_topic, score, total, pct,
+                        [(q['num'], ua, result['correct']) for q, ua, result in results]
+                    )
                     st.markdown(f"### 📊 Score: {score}/{total} ({pct:.1f}%)")
                     if pct >= 80:
                         st.balloons()

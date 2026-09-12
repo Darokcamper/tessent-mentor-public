@@ -372,18 +372,22 @@ def retrieve(query, top_k=5, source_filter=None):
     # Require at least one underscore + a real command root to avoid grabbing plain words
     # like "set", "add", "get", "run" that appear in ordinary English queries.
     cmd_hits = re.findall(r"\b(?:set|add|create|remove|delete|write|read|report|get|put|check|run|save|do|exit|source|define)_[a-z0-9_]+\b", query)
+    command_defs = []
     if cmd_hits:
-        # Only use precise lookup when the query is dominated by command name(s), to avoid
-        # hijacking normal questions.
-        defs = []
         for tok in dict.fromkeys(cmd_hits):
-            defs.extend(retrieve_command_definition(tok, source_filter=source_filter))
-        if defs:
-            # Prefer definitions in the Shell Reference manual for the fuller option list
-            defs.sort(key=lambda d: (0 if "tshell_ref" in d["source"].lower() else 1, d["page"]))
-            return defs[:top_k]
+            command_defs.extend(retrieve_command_definition(tok, source_filter=source_filter))
+        if command_defs:
+            command_defs.sort(key=lambda d: (0 if "tshell_ref" in d["source"].lower() else 1, d["page"]))
+            # If the user is specifically asking for syntax / usage / options, or query is short:
+            q_lower = query.lower()
+            syntax_terms = ["syntax", "usage", "options", "arguments", "definition", "how to use", "switches", "flags", "parameters"]
+            if len(query.split()) <= 4 or any(t in q_lower for t in syntax_terms):
+                return command_defs[:top_k]
     if not load_rag():
-        return search_txt_files_fallback(query, top_k=top_k)
+        fallback_results = search_txt_files_fallback(query, top_k=top_k)
+        if command_defs:
+            return (command_defs[:2] + fallback_results)[:top_k]
+        return fallback_results
         
     query_vector = _loaded_model.encode([query]).astype("float32")
     faiss.normalize_L2(query_vector)
@@ -474,6 +478,11 @@ def retrieve(query, top_k=5, source_filter=None):
             "score": float(score)
         })
         
+    if command_defs:
+        seen = {r["text"] for r in results}
+        added = [d for d in command_defs[:2] if d["text"] not in seen]
+        results = (added + results)[:top_k]
+
     return results
 
 def upload_and_index_pdf(file_bytes, filename, topic="Digital Book"):
