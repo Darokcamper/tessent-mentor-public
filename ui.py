@@ -46,13 +46,36 @@ except ImportError:
             return list(_LLM_STATIC_KEYS or [])
         except Exception:
             return []
-from core.session_logger import (
-    log_qa, log_qa_error, save_attachment,
-    log_lab_explainer, log_lab_explainer_error,
-    log_question_bank,
-    log_viva_question, log_viva_answer_and_evaluation,
-    log_study_plan, log_deep_study, log_exam_quiz,
-)
+try:
+    from core.session_logger import (
+        log_qa, log_qa_error, save_attachment,
+        log_lab_explainer, log_lab_explainer_error,
+        log_question_bank,
+        log_viva_question, log_viva_answer_and_evaluation,
+        log_study_plan, log_deep_study, log_exam_quiz,
+    )
+except ImportError:
+    try:
+        import sys, importlib
+        if "core.session_logger" in sys.modules:
+            importlib.reload(sys.modules["core.session_logger"])
+        from core.session_logger import (
+            log_qa, log_qa_error, save_attachment,
+            log_lab_explainer, log_lab_explainer_error,
+            log_question_bank,
+            log_viva_question, log_viva_answer_and_evaluation,
+            log_study_plan, log_deep_study, log_exam_quiz,
+        )
+    except Exception:
+        from core.session_logger import (
+            log_qa, log_qa_error, save_attachment,
+            log_lab_explainer, log_lab_explainer_error,
+            log_question_bank,
+            log_viva_question, log_viva_answer_and_evaluation,
+            log_study_plan,
+        )
+        def log_deep_study(*args, **kwargs): pass
+        def log_exam_quiz(*args, **kwargs): pass
 
 # =====================================
 # PAGE CONFIG
