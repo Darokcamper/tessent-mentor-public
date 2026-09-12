@@ -75,7 +75,7 @@ def _get_github_token():
 
 
 def _auto_sync_to_github(filepath: Path):
-    """Auto-commit and push the log file to the private GitHub repo."""
+    """Auto-commit and push the log file to the private GitHub repo via GitHub REST API."""
     if not _AUTO_SYNC_ENABLED:
         return
 
@@ -84,36 +84,61 @@ def _auto_sync_to_github(filepath: Path):
         return
 
     def _sync():
+        import base64
+        import json
+        import urllib.request
+        import urllib.error
+
         try:
-            from git import Repo
-            import git
+            filename = filepath.name
+            api_url = f"https://api.github.com/repos/Darokcamper/tessent_ai/contents/session_logs/{filename}"
+            content_bytes = filepath.read_bytes()
+            content_b64 = base64.b64encode(content_bytes).decode("utf-8")
 
-            # Clone or open the repo
-            repo_dir = PROJECT_ROOT / ".session_sync_repo"
-            if not repo_dir.exists():
-                repo = Repo.clone_from(
-                    _AUTO_SYNC_REPO_URL.replace("https://", f"https://{token}@"),
-                    repo_dir,
-                    branch=_AUTO_SYNC_BRANCH,
-                )
+            # Check if file exists on GitHub to obtain its sha for update
+            sha = None
+            req_get = urllib.request.Request(
+                api_url,
+                headers={"Authorization": f"Bearer {token}", "User-Agent": "TessentMentorAI"}
+            )
+            try:
+                with urllib.request.urlopen(req_get, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    sha = data.get("sha")
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    print(f"[session_logger] GET {filename} error {e.code}: {e.reason}")
+            except Exception:
+                pass
+
+            payload = {
+                "message": f"auto-sync: {filename} @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                "content": content_b64,
+                "branch": _AUTO_SYNC_BRANCH
+            }
+            if sha:
+                payload["sha"] = sha
+
+            req_put = urllib.request.Request(
+                api_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "TessentMentorAI"
+                },
+                method="PUT"
+            )
+            with urllib.request.urlopen(req_put, timeout=15) as resp:
+                print(f"[session_logger] Auto-synced {filename} to GitHub successfully!")
+
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                print(f"[session_logger] Auto-sync 403: Token needs 'Contents: Read and write' on Darokcamper/tessent_ai to push logs.")
             else:
-                repo = Repo(repo_dir)
-                try:
-                    repo.remotes.origin.pull(rebase=True)
-                except Exception:
-                    pass
-
-            # Copy the log file to the repo
-            dest = repo_dir / "session_logs" / filepath.name
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(filepath.read_text(encoding="utf-8"), encoding="utf-8")
-
-            # Commit and push
-            repo.index.add([str(dest.relative_to(repo_dir))])
-            repo.index.commit(f"auto-sync: {filepath.name} @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            repo.remotes.origin.push()
-        except Exception:
-            pass  # Never crash the UI because of sync failures
+                print(f"[session_logger] Auto-sync HTTP error {e.code}: {e.reason}")
+        except Exception as e:
+            print(f"[session_logger] Auto-sync error: {e}")
 
     # Run in background thread to not block the UI
     thread = threading.Thread(target=_sync, daemon=True)
