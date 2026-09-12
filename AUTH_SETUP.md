@@ -118,7 +118,7 @@ Users **without** an entry (and with no global `APP_TOTP_SECRET`) skip 2FA.
 ## Security notes & limits
 
 - Passwords are compared with `hmac.compare_digest` but stored **in plaintext
-  in secrets** — use unique, long passwords; rotate after the assessment week.
+  in secrets** — use unique, long passwords; rotate them periodically.
 - There is **no brute-force lockout** — keep the URL private.
 - Auth is UI-level gating (protects model usage); there is no per-user data
   isolation (chat history is per browser session).

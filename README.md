@@ -1,6 +1,6 @@
-# 🧠 Tessent Mentor AI — Assessment Edition
+# 🧠 Tessent & DFT Expert AI
 
-Tessent Mentor AI is a production-quality, multi-agent educational platform for preparing for Tessent / VLSI Design-for-Test (DFT) assessments and interviews. Every answer is grounded strictly in the official Tessent reference manuals using a page-level citation RAG pipeline, and every question & answer is logged to disk.
+A production-quality, multi-agent AI assistant for **Tessent** and **VLSI Design-for-Test (DFT)** engineers and learners. Every answer is grounded strictly in official Tessent reference manuals using a page-level citation RAG pipeline, and every session interaction is logged to disk.
 
 ---
 
@@ -8,13 +8,16 @@ Tessent Mentor AI is a production-quality, multi-agent educational platform for 
 
 1. **Manual-Grounded Q&A with Exact Citations** — A 14-domain expert router (SCAN, ATPG, EDT, MBIST, JTAG, IJTAG, WRAPPER, OCC, BOUNDARYSCAN, STA, GLS, TCL, LINUX, GENERAL) answers strictly from retrieved manual excerpts with `[Source: file, Page N]` citations. If the manuals don't cover a topic, the agent says so instead of guessing.
 2. **File & Image Attachment** — Attach a PDF, DOCX, PPTX, TXT, or image (waveform/screenshot/log) directly with a question. Documents are read for context (still grounded strictly in the manuals), and images are analyzed by the Gemini vision model. Optionally index attached documents permanently into the knowledge base.
-2. **Lab & Command Explainer** — Explains Tessent shell commands and lab scripts from the Shell Reference / lab manuals.
-3. **Assessment Question Generator** — Generates module-wise practice question banks.
-4. **Interactive Viva Practice** — Mock interview questions evaluated per answer (score + strengths/weaknesses).
-5. **DFT Study Planner** — Analyzes viva performance and generates a personalized study plan.
-6. **Robust OCR Pipeline** — `ocrmypdf` for scanned PDFs, plus RapidOCR for lecture slide screenshots.
-7. **Resilient LLM Layer** — Rotates up to 6 Gemini API keys with model fallback and exponential backoff to survive rate limits; normalizes multi-part responses to plain strings to prevent agent crashes.
-8. **Session Logging** — Every Q&A, viva answer, lab explanation, and study plan is saved to `session_logs/`.
+3. **Lab & Command Explainer** — Explains Tessent shell commands and lab scripts from the Shell Reference / lab manuals, step by step.
+4. **Practice Question Generator** — Generates module-wise practice question banks for SCAN, ATPG, EDT, and more.
+5. **Interactive Viva Practice** — Mock interview/viva questions evaluated per answer (score + strengths/weaknesses), grounded in Tessent manuals.
+6. **DFT Study Planner** — Analyzes viva performance and generates a personalized study and revision plan.
+7. **Deep Study — Video Lessons & Lab Exercises** — Generate detailed study reports from ATPG Core Topics lecture transcripts, slide screenshots, and lab exercises.
+8. **Exam Question Bank** — Practice with real Level 1 exam questions parsed from the training platform.
+9. **Batch Export** — Generate all Deep Study reports (lessons + labs) to Markdown files at once.
+10. **Robust OCR Pipeline** — `ocrmypdf` for scanned PDFs, plus RapidOCR for lecture slide screenshots.
+11. **Resilient LLM Layer** — Rotates up to 6 Gemini API keys with model fallback and exponential backoff to survive rate limits; normalizes multi-part responses to plain strings to prevent agent crashes.
+12. **Session Logging** — Every Q&A, viva answer, lab explanation, and study plan is saved to `session_logs/` and auto-synced to GitHub.
 
 ---
 
@@ -35,7 +38,10 @@ vlsi-mentor-ai/
 │   ├── evaluator_agent.py      # Answer evaluation & scoring
 │   ├── planner_agent.py        # Personalized study planner
 │   ├── lab_explainer_agent.py  # Lab / command explainer
-│   └── question_bank_agent.py  # Assessment question bank generator
+│   ├── deep_study_agent.py     # Video lesson & lab deep-study report generator
+│   ├── crossref_agent.py       # Lab ↔ manual cross-reference builder
+│   ├── exam_bank_agent.py      # Exam question bank loader & evaluator
+│   └── question_bank_agent.py  # Practice question bank generator
 │
 ├── core/                       # Core infrastructure
 │   ├── llm.py                  # Rotating multi-key Gemini LLM (content normalization + vision)
@@ -44,7 +50,9 @@ vlsi-mentor-ai/
 │   ├── file_reader.py          # Text extraction for attached PDF/DOCX/PPTX/TXT files
 │   ├── memory.py               # Short-term chat history formatting
 │   ├── streaming.py            # Streamed response utilities
-│   └── session_logger.py       # Disk logging of all interactions
+│   ├── auth.py                 # Layered auth gate (Google OIDC / password+TOTP / open)
+│   ├── bootstrap.py            # Private knowledge bundle restore at boot
+│   └── session_logger.py       # Disk logging + GitHub auto-sync of all interactions
 │
 ├── knowledge/                  # Knowledge base (committed)
 │   ├── 01_Tessent_Shell_User_Manual/
@@ -54,8 +62,15 @@ vlsi-mentor-ai/
 │   ├── 05_Scan_and_ATPG_Lab_Manual/
 │   └── Tessent Atpg Core Topics/   # 900+ lecture screenshots + .srt subtitles
 │
+├── tools/                      # Build & maintenance scripts
+│   ├── pack_knowledge.py       # Build the private knowledge_bundle.zip
+│   ├── make_public_repo.py     # Export a clean public repo (code only)
+│   ├── regen_exam_json.py      # Re-parse exam questions via Gemini vision
+│   └── gen_auth_secrets.py     # Generate cookie_secret + TOTP base32 secret
+│
 ├── tests/                      # Unit tests (RAG, agents, graph)
 ├── ui.py                       # Streamlit web UI (single entry point)
+├── AUTH_SETUP.md               # Detailed auth configuration guide
 ├── _run_ocr.bat                # OCR all Core Topics slides + rebuild index (Windows)
 ├── _build_idx.bat              # Rebuild FAISS index (Windows)
 ├── Dockerfile / docker-compose.yml
@@ -143,27 +158,31 @@ venv\Scripts\streamlit run ui.py
 Open `http://localhost:8501`. Sidebar modes:
 - 📤 **Upload Manuals & Labs** — index a new PDF on the fly
 - 📖 **Ask Question & Manual Citation** — grounded Q&A across 14 DFT domains (optionally attach a document or image)
-- 🧪 **Lab & Command Explainer** — explain Tessent commands / lab scripts
-- ❓ **Assessment Question Generator** — module-wise question banks
-- 🎤 **Interactive Viva Practice** — graded mock interview
-- 📚 **DFT Study Planner** — performance analytics + study plan
+- 🧪 **Lab & Command Explainer** — explain Tessent commands / lab scripts step by step
+- ❓ **Practice Question Generator** — module-wise DFT practice question banks
+- 🎤 **Interactive Viva Practice** — graded mock interview / viva practice
+- 📚 **DFT Study Planner** — performance analytics + personalized revision plan
+- 🔬 **Deep Study (Videos & Labs)** — detailed study reports from lecture transcripts, slides, and lab exercises
+- 📝 **Exam Question Bank** — practice with real Level 1 exam questions
+- 📦 **Batch Export** — generate all deep study reports to disk at once
 
 ### Docker
 ```bash
 docker compose up --build
 ```
 
-### 🔐 Access Control (password / email gate)
+### 🔐 Access Control (Google / password / TOTP gate)
 
-The app ships with a lightweight sign-in gate (`core/auth.py`). Behavior:
+The app ships with a layered sign-in gate (`core/auth.py`). See [`AUTH_SETUP.md`](AUTH_SETUP.md) for full configuration.
 
-| Config | Behavior |
-|---|---|
-| `APP_PASSWORD` unset/empty | **Open access** (local dev default) |
-| `APP_PASSWORD` set, `APP_ALLOWED_EMAILS` empty | Password-only sign-in |
-| Both set | User must enter a listed email **and** a valid password |
+| Layer | Enable with | What users see |
+|---|---|---|
+| **Google sign-in (OIDC)** | `[auth]` section in secrets | "Sign in with Google" button |
+| **Email + password** | `APP_PASSWORD` in secrets | email + password form |
+| **TOTP 2FA** | `APP_TOTP_SECRET` / `APP_TOTP_SECRETS` | extra 6-digit code on the form |
+| **Open access** | *nothing set* ⚠️ | open to anyone with the URL |
 
-- `APP_PASSWORD` accepts a comma-separated list, e.g. `APP_PASSWORD=trainer123,guest456` (multiple shared passwords, e.g. trainer vs. trainee).
+- `APP_PASSWORD` accepts a comma-separated list, e.g. `APP_PASSWORD=user1pass,user2pass`.
 - `APP_ALLOWED_EMAILS` is a comma-separated allowlist, e.g. `alice@x.com,bob@y.com`. Case-insensitive.
 - Session state is per-browser; a **Sign out** button appears in the sidebar.
 
@@ -180,12 +199,12 @@ Set the values in `.env` (local / Docker via `env_file`) or Streamlit secrets (c
 
 | Option | Auth support | Cost | Notes |
 |---|---|---|---|
-| **Streamlit Community Cloud** (share.streamlit.io) | ✅ Streamlit's built-in options + this app gate | Free | Deploy straight from the GitHub repo; add `APP_PASSWORD`, `APP_ALLOWED_EMAILS` and Gemini keys in *Settings → Secrets*. Easiest path. |
+| **Streamlit Community Cloud** (share.streamlit.io) | ✅ Streamlit's built-in options + this app gate | Free | Deploy straight from the GitHub repo; add secrets in *Settings → Secrets*. Easiest path. |
 | **Render / Railway** (Docker) | ✅ This gate | Free tier / ~$5 mo | Deploy the `Dockerfile`; set env vars in dashboard. Container sleeps on free tiers (cold starts). |
 | **Fly.io / AWS / GCP / Azure** (Docker) | ✅ This gate | Pay-as-you-go | Full control; best for always-on company use. |
 | **Internal company server** (Docker) | ✅ This gate | Hardware only | `docker compose up -d` behind the intranet; works fully offline except Gemini API calls. |
 
-**Recommended for your use case** (small cohort of trainees): push to GitHub → Streamlit Community Cloud → set secrets. The app gate restricts entry, and the repo stays private.
+**Recommended for small teams**: push to GitHub → Streamlit Community Cloud → set secrets. The app gate restricts entry, and the repo stays private.
 
 ### Streamlit Community Cloud checklist
 
@@ -211,15 +230,15 @@ python tools/make_public_repo.py --dest C:\path\to\tessent-mentor-public
 
 Then:
 1. Create the **public** GitHub repo from that folder (`git init`, commit, push).
-2. On the **private** repo (`Darokcamper/tessent_ai`): Releases -> Draft a new
-   release -> tag `v1` -> upload `dist/knowledge_bundle.zip` as an asset -> Publish.
+2. On the **private** repo (`Darokcamper/tessent_ai`): Releases → Draft a new
+   release → tag `v1` → upload `dist/knowledge_bundle.zip` as an asset → Publish.
 3. Create a **fine-grained PAT** (read-only, Contents: Read-only, access to only
-   the private repo). GitHub -> Settings -> Developer settings -> Fine-grained tokens.
-4. Deploy on share.streamlit.io: *New app* -> pick the **public** repo -> `ui.py` ->
-   *Advanced settings* -> **Python 3.13**.
-5. *Settings -> Secrets* (TOML):
+   the private repo). GitHub → Settings → Developer settings → Fine-grained tokens.
+4. Deploy on share.streamlit.io: *New app* → pick the **public** repo → `ui.py` →
+   *Advanced settings* → **Python 3.13**.
+5. *Settings → Secrets* (TOML):
 ```toml
-APP_PASSWORD = "trainer123"
+APP_PASSWORD = "yourpassword"
 APP_ALLOWED_EMAILS = "alice@x.com,bob@y.com"
 GEMINI_API_KEY_1 = "..."
 KB_BUNDLE_URL = "https://github.com/YOUR_USER/tessent_ai/releases/download/v1/knowledge_bundle.zip"
@@ -232,7 +251,7 @@ KB_BUNDLE_TOKEN = "github_pat_..."
 **Option 2 - keep everything in the private repo (no extra work, but needs GitHub-App access)**
 
 If the Streamlit GitHub App has been granted access to the private repo
-(GitHub -> Settings -> Integrations -> Applications -> Streamlit -> Configure),
+(GitHub → Settings → Integrations → Applications → Streamlit → Configure),
 the committed index/caches boot instantly and no bundle is needed. The public
 repo remains the reliable fallback when this is refused.
 
@@ -250,3 +269,5 @@ venv\Scripts\python.exe -m unittest discover -s tests
 ## 🛡️ Security & Production Guidelines
 - **API Keys**: load secrets via `os.getenv` / Streamlit secrets — never hardcode.
 - **Git Ignore**: `.env`, venvs, cached text, vector stores, and logs are excluded from git.
+- **Passwords**: compared with `hmac.compare_digest` but stored in plaintext in secrets — use unique, long passwords and keep the URL private.
+- **No brute-force lockout** — the app is UI-level gating. For production, put it behind a VPN or company SSO.

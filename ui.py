@@ -57,7 +57,7 @@ from core.session_logger import (
 # =====================================
 # PAGE CONFIG
 # =====================================
-st.set_page_config(page_title="Tessent Mentor AI - Assessment Edition", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="Tessent & DFT Expert AI", page_icon="🧠", layout="wide")
 
 # =====================================
 # AUTH GATE (Google sign-in / password + 2FA / open)
@@ -126,7 +126,7 @@ def extract_score(eval_text):
 with st.sidebar:
     auth_badge_sidebar()
     st.title("🧠 Tessent Mentor AI")
-    st.caption("1-Week Assessment Preparation Edition")
+    st.caption("Tessent & DFT Expert Assistant")
     
     mode = st.radio(
         "Navigation Mode",
@@ -223,7 +223,7 @@ with st.sidebar:
     st.markdown("---")
 
     if mode == "📖 Ask Question & Manual Citation":
-        st.markdown("### Core Assessment Modules")
+        st.markdown("### Core DFT Domains")
         st.markdown("- 🟢 **SCAN** (Tessent Scan)")
         st.markdown("- 🔵 **ATPG** (Tessent FastScan)")
         st.markdown("- 🟣 **EDT** (Tessent TestKompress)")
@@ -443,8 +443,8 @@ elif mode == "📖 Ask Question & Manual Citation":
 # 2. LAB & COMMAND EXPLAINER MODE
 # =====================================
 elif mode == "🧪 Lab & Command Explainer":
-    st.title("🧪 Tessent Lab & Command Explainer (POC Prep)")
-    st.caption("Analyze lab scripts step-by-step. Get internal DB mechanics, flow placement, output files, missing command impact, and top POC viva questions.")
+    st.title("🧪 Tessent Lab & Command Explainer")
+    st.caption("Analyze Tessent lab scripts step-by-step. Get internal DB mechanics, flow placement, output files, missing command impact, and key interview/viva questions.")
 
     col1, col2 = st.columns([1, 3])
     with col1:
@@ -482,20 +482,20 @@ elif mode == "🧪 Lab & Command Explainer":
             st.error("Please enter a command or script sequence.")
 
 # =====================================
-# 3. ASSESSMENT QUESTION GENERATOR MODE
+# 3. PRACTICE QUESTION GENERATOR MODE
 # =====================================
 elif mode == "❓ Assessment Question Generator":
-    st.title("❓ Tessent Assessment & Viva Bank Generator")
-    st.caption("Generate a targeted 20-question viva bank for any core module, with benchmark model answers and manual citations.")
+    st.title("❓ DFT Practice & Viva Question Generator")
+    st.caption("Generate a targeted question bank for any core DFT/Tessent module, with benchmark model answers and manual citations.")
 
     col1, col2 = st.columns(2)
     with col1:
-        target_module = st.selectbox("Select Core Assessment Module", ["SCAN", "ATPG", "EDT", "LINUX / TSHELL"])
+        target_module = st.selectbox("Select DFT Module", ["SCAN", "ATPG", "EDT", "LINUX / TSHELL"])
     with col2:
-        num_q = st.slider("Number of Viva Questions", min_value=5, max_value=20, value=15)
+        num_q = st.slider("Number of Questions", min_value=5, max_value=20, value=15)
 
-    if st.button("🎲 Generate Viva Question Bank", use_container_width=True):
-        with st.spinner(f"Building {num_q}-question Assessment Bank for {target_module}..."):
+    if st.button("🎲 Generate Question Bank", use_container_width=True):
+        with st.spinner(f"Building {num_q}-question bank for {target_module}..."):
             q_bank = generate_assessment_question_bank(target_module, num_questions=num_q)
             st.markdown(q_bank)
             log_question_bank(target_module, num_q, q_bank)
@@ -504,8 +504,8 @@ elif mode == "❓ Assessment Question Generator":
 # 4. INTERACTIVE VIVA PRACTICE MODE
 # =====================================
 elif mode == "🎤 Interactive Viva Practice":
-    st.title("🎤 Tessent Mock Assessment & Viva Simulator")
-    st.caption("Practice mock viva questions. Your answers will be graded against Tessent reference manual criteria to highlight your score and weak spots.")
+    st.title("🎤 Tessent Interactive Viva & Interview Practice")
+    st.caption("Practice DFT interview and viva questions. Your answers are graded against Tessent reference manual criteria with scores and detailed feedback.")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -525,7 +525,7 @@ elif mode == "🎤 Interactive Viva Practice":
             log_viva_question(topic, difficulty, question)
 
     if "interview_question" in st.session_state:
-        st.markdown("### 🎙️ POC Assessor Question")
+        st.markdown("### 🎙️ Interview Question")
         st.info(st.session_state["interview_question"])
 
         candidate_answer = st.text_area("Type your explanation / answer below:", height=180, placeholder="Explain what the command does, why it's placed here, what file is generated, or what happens if skipped...")
@@ -543,15 +543,15 @@ elif mode == "🎤 Interactive Viva Practice":
                 st.warning("Please type an answer before submitting.")
 
     if "evaluation" in st.session_state:
-        st.markdown("### 📋 Assessor Evaluation Report")
+        st.markdown("### 📋 Evaluation Report")
         st.markdown(st.session_state["evaluation"])
 
 # =====================================
 # 5. DFT STUDY PLANNER MODE
 # =====================================
 elif mode == "📚 DFT Study Planner":
-    st.title("📚 Personalized 7-Day Assessment Study Guide")
-    st.caption("Track your practice metrics, visualize score trends, and follow your customized revision schedule.")
+    st.title("📚 Personalized DFT Study Planner")
+    st.caption("Track your practice metrics, visualize score trends, and get a customized DFT study and revision schedule.")
 
     if st.session_state.evaluations:
         scores = []
@@ -571,10 +571,10 @@ elif mode == "📚 DFT Study Planner":
             with col3:
                 readiness = "Needs Work (< 6)"
                 if avg_score >= 8:
-                    readiness = "Assessment Ready (8–10)"
+                    readiness = "Interview Ready (8–10)"
                 elif avg_score >= 6:
-                    readiness = "Passing Level (6–7.9)"
-                st.metric("Assessment Readiness", readiness)
+                    readiness = "Good Level (6–7.9)"
+                st.metric("Interview Readiness", readiness)
 
             st.markdown("### 📈 Viva Score History")
             st.line_chart(scores)
@@ -582,11 +582,11 @@ elif mode == "📚 DFT Study Planner":
             st.info("Start practicing viva questions in **Interactive Viva Practice** mode to see your score trends here!")
 
         st.markdown("---")
-        st.markdown("### 📋 Your Personalized 7-Day Study Guide")
+        st.markdown("### 📋 Your Personalized Study Guide")
 
         if "cached_study_plan" in st.session_state:
             st.markdown(st.session_state["cached_study_plan"])
-            if st.button("🔄 Regenerate 7-Day Assessment Plan", use_container_width=True):
+            if st.button("🔄 Regenerate Study Plan", use_container_width=True):
                 with st.spinner("Regenerating 7-day revision plan..."):
                     study_plan = generate_study_plan(st.session_state.asked_questions, st.session_state.evaluations)
                     st.session_state["cached_study_plan"] = study_plan
