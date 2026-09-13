@@ -24,6 +24,7 @@ Config (env vars via .env, or Streamlit secrets) - see AUTH_SETUP.md:
 Call require_auth() at the very top of ui.py, before any other st.* widgets.
 """
 import os
+import re
 import hmac
 import streamlit as st
 
@@ -132,7 +133,8 @@ def _passwords() -> list:
 
 def _allowed_emails() -> list:
     raw = _get("APP_ALLOWED_EMAILS", "")
-    emails = [e.strip().lower() for e in raw.split(",") if e.strip()]
+    tokens = re.split(r"[,;\s]+", raw)
+    emails = [e.strip().lower() for e in tokens if "@" in e]
     # Auto-include any users defined with dedicated passwords
     for u in _user_passwords():
         if u not in emails:
@@ -241,19 +243,29 @@ def current_user() -> str:
     return "user"
 
 
+def owner_emails() -> list:
+    """Parse comma/space separated owner emails from APP_OWNER_EMAIL."""
+    raw = _get("APP_OWNER_EMAIL", "hazarh833@gmail.com")
+    tokens = re.split(r"[,;\s]+", raw)
+    return [e.strip().lower() for e in tokens if "@" in e]
+
+
 def owner_email() -> str:
-    return _get("APP_OWNER_EMAIL", "hazarh833@gmail.com").strip().lower()
+    owners = owner_emails()
+    return owners[0] if owners else "hazarh833@gmail.com"
 
 
 def is_owner() -> bool:
-    """True if the current session belongs to the owner, or if open access in local dev."""
+    """True if the current session belongs to any of the owners, or if open access in local dev."""
     passwords = _passwords()
     oidc = _oidc_enabled()
     if not passwords and not oidc:
         return True  # local dev open mode is owner mode by default
     u = current_user().strip().lower()
-    owner = owner_email()
-    if u and owner and u == owner:
+    if not u:
+        return False
+    owners = owner_emails()
+    if u in owners:
         return True
     allowed = _allowed_emails()
     if allowed and u == allowed[0]:
