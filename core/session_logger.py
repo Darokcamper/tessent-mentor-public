@@ -394,4 +394,3 @@ def log_exam_quiz(topic: str, score: int, total: int, pct: float, details: list 
             status = "CORRECT" if is_correct else "INCORRECT"
             detail_lines.append(f"Q{q_num}: {user_ans} [{status}]")
         fields.append(("ANSWERS", "\n".join(detail_lines)))
-    _write_block("EXAM QUIZ ATTEMPT", fields)
