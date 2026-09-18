@@ -244,8 +244,8 @@ def current_user() -> str:
 
 
 def owner_emails() -> list:
-    """Parse comma/space separated owner emails from APP_OWNER_EMAIL."""
-    raw = _get("APP_OWNER_EMAIL", "hazarh833@gmail.com")
+    """Parse comma/space separated owner emails from APP_OWNER_EMAILS or APP_OWNER_EMAIL."""
+    raw = _get("APP_OWNER_EMAILS") or _get("APP_OWNER_EMAIL", "hazarh833@gmail.com")
     tokens = re.split(r"[,;\s]+", raw)
     return [e.strip().lower() for e in tokens if "@" in e]
 
@@ -261,16 +261,29 @@ def is_owner() -> bool:
     oidc = _oidc_enabled()
     if not passwords and not oidc:
         return True  # local dev open mode is owner mode by default
+    try:
+        if not is_authenticated():
+            # Not in an authenticated web session (e.g. CLI scripts or unit tests)
+            return True
+    except Exception:
+        return True
     u = current_user().strip().lower()
     if not u:
         return False
     owners = owner_emails()
     if u in owners:
         return True
-    allowed = _allowed_emails()
-    if allowed and u == allowed[0]:
-        return True
     return False
+
+
+def is_guest() -> bool:
+    """True if the user is authenticated in a web session as a non-owner guest."""
+    try:
+        if not is_authenticated():
+            return False
+        return not is_owner()
+    except Exception:
+        return False
 
 
 def logout():

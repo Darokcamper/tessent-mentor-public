@@ -168,6 +168,22 @@ with st.sidebar:
         ]
     )
 
+    # Helper to enforce Strict Guest Mode (BYOK) across the app
+    def ensure_llm_access() -> bool:
+        if is_owner():
+            if not bool(_get_gemini_keys()) and not bool(st.session_state.get("guest_api_key")):
+                st.error("🔑 No Gemini API key configured. Add one in the sidebar, or set "
+                         "GEMINI_API_KEY_1..6 (or GEMINI_API_KEY) in Settings -> Secrets.")
+                return False
+            return True
+        else:
+            guest_key = str(st.session_state.get("guest_api_key", "")).strip()
+            if not guest_key:
+                st.warning("🔑 **Guest Mode (BYOK)**: You must enter your own free Gemini API key in the sidebar to ask questions. "
+                           "(Get your free key at [Google AI Studio](https://aistudio.google.com/app/apikey))")
+                return False
+            return True
+
     # Owner vs Guest Mode check
     backend_keys_ok = bool(_get_gemini_keys())
 
@@ -185,15 +201,19 @@ with st.sidebar:
         if _key_input:
             st.session_state["guest_api_key"] = _key_input.strip()
     else:
-        st.info("👤 **Guest Mode**: Enter your Gemini API key below:")
+        st.info("👤 **Guest Mode (BYOK)**: Enter your Gemini API key below:")
         _key_input = st.text_input(
-            "🔑 Gemini API Key",
+            "🔑 Gemini API Key (Required)",
             type="password",
             value=st.session_state.get("guest_api_key", ""),
             help="Get your free key at https://aistudio.google.com/app/apikey",
         )
         if _key_input:
             st.session_state["guest_api_key"] = _key_input.strip()
+            st.success("✅ Personal API key active")
+        else:
+            st.session_state["guest_api_key"] = ""
+            st.warning("⚠️ Enter your free Gemini API key to ask questions.")
 
 
     st.markdown("---")
@@ -359,10 +379,7 @@ elif mode == "📖 Ask Question & Manual Citation":
     question = st.chat_input("Ask a Tessent Scan, ATPG, EDT, or TShell question...")
 
     if question:
-        has_key = bool(_get_gemini_keys()) or bool(st.session_state.get("guest_api_key"))
-        if not has_key:
-            st.error("🔑 No Gemini API key configured. Add one in the sidebar, or set "
-                     "GEMINI_API_KEY_1..6 (or GEMINI_API_KEY) in Settings -> Secrets.")
+        if not ensure_llm_access():
             st.stop()
 
         history = st.session_state.messages
@@ -493,6 +510,8 @@ elif mode == "🧪 Lab & Command Explainer":
     script_input = st.text_area("Paste Lab TCL Commands or Script Sequence:", value=default_script, height=180, placeholder="e.g. read_verilog top.v\nset_current_design top\nadd_clocks 0 clk\ncheck_design_rules")
 
     if st.button("🚀 Explain Lab Command Sequence", use_container_width=True):
+        if not ensure_llm_access():
+            st.stop()
         if script_input:
             with st.spinner("Analyzing command flow against Tessent Reference Manuals..."):
                 try:
@@ -520,6 +539,8 @@ elif mode == "❓ Assessment Question Generator":
         num_q = st.slider("Number of Questions", min_value=5, max_value=20, value=15)
 
     if st.button("🎲 Generate Question Bank", use_container_width=True):
+        if not ensure_llm_access():
+            st.stop()
         with st.spinner(f"Building {num_q}-question bank for {target_module}..."):
             q_bank = generate_assessment_question_bank(target_module, num_questions=num_q)
             st.markdown(q_bank)
@@ -542,6 +563,8 @@ elif mode == "🎤 Interactive Viva Practice":
         difficulty = st.selectbox("Difficulty Level", ["Beginner (Basic Commands)", "Intermediate (Lab DRCs)", "Advanced (POC Tricky Scenarios)"])
 
     if st.button("Generate Viva Question", use_container_width=True):
+        if not ensure_llm_access():
+            st.stop()
         with st.spinner("Generating mock viva question..."):
             question = ask_interview_question(topic, difficulty, st.session_state["asked_questions"])
             st.session_state["interview_question"] = question
@@ -556,6 +579,8 @@ elif mode == "🎤 Interactive Viva Practice":
         candidate_answer = st.text_area("Type your explanation / answer below:", height=180, placeholder="Explain what the command does, why it's placed here, what file is generated, or what happens if skipped...")
 
         if st.button("Submit Answer for Evaluation", use_container_width=True):
+            if not ensure_llm_access():
+                st.stop()
             if candidate_answer.strip():
                 with st.spinner("Grading response against Tessent Reference Manual criteria..."):
                     result = evaluate_viva_answer(st.session_state["interview_question"], candidate_answer)
@@ -612,6 +637,8 @@ elif mode == "📚 DFT Study Planner":
         if "cached_study_plan" in st.session_state:
             st.markdown(st.session_state["cached_study_plan"])
             if st.button("🔄 Regenerate Study Plan", use_container_width=True):
+                if not ensure_llm_access():
+                    st.stop()
                 with st.spinner("Regenerating 7-day revision plan..."):
                     study_plan = generate_study_plan(st.session_state.asked_questions, st.session_state.evaluations)
                     st.session_state["cached_study_plan"] = study_plan
@@ -620,6 +647,8 @@ elif mode == "📚 DFT Study Planner":
         else:
             st.info("Click the button below to generate your personalized 7-day study plan based on your viva practice scores.")
             if st.button("📝 Generate 7-Day Study Plan", use_container_width=True):
+                if not ensure_llm_access():
+                    st.stop()
                 with st.spinner("Generating 7-day revision plan..."):
                     study_plan = generate_study_plan(st.session_state.asked_questions, st.session_state.evaluations)
                     st.session_state["cached_study_plan"] = study_plan
@@ -657,6 +686,8 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
 
             if sel_lesson == "Whole module (all lessons)":
                 if st.button("🎥 Generate Deep Study Report", key="ds_video_btn", use_container_width=True):
+                    if not ensure_llm_access():
+                        st.stop()
                     with st.spinner("Reading transcript, slides and manuals... (this can take a minute)"):
                         v_rep = explain_video_lesson(sel_num)
                         st.session_state["ds_video_report_" + str(sel_num)] = v_rep
@@ -685,6 +716,8 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
                 )
 
                 if st.button("🎥 Generate Lesson Report", key="ds_lesson_btn", use_container_width=True):
+                    if not ensure_llm_access():
+                        st.stop()
                     with st.spinner("Reading this lesson's transcript, slides and manuals... (up to a minute)"):
                         report, ppt_path, dia = explain_video_lesson_detail_v2(
                             sel_num, sel_lesson, generate_ppt=False, include_diagrams=include_diagrams
@@ -774,6 +807,8 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
             )
             
             if st.button("🧪 Generate Deep Study Report", key="ds_lab_btn", use_container_width=True):
+                if not ensure_llm_access():
+                    st.stop()
                 with st.spinner("Reading ALL lab files: slides, TCL, screenshots, manuals... (this can take 1-2 minutes)"):
                     report, ppt_path, dia = explain_lab_exercise_v2(
                         sel_lab, generate_ppt=False, include_diagrams=include_diagrams

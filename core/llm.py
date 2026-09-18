@@ -165,6 +165,17 @@ class RotatingGeminiLLM:
         if custom_key:
             key = custom_key
         else:
+            # Enforce Strict Guest Mode (BYOK): guests MUST supply their own API key
+            try:
+                from core.auth import is_guest
+                if is_guest():
+                    raise ValueError(
+                        "Guest Mode requires your own free Gemini API key to ask questions. "
+                        "Please enter your key in the sidebar (get a free key at https://aistudio.google.com/app/apikey)."
+                    )
+            except ImportError:
+                pass
+
             keys = get_gemini_keys()
             if keys:
                 key = keys[self.key_idx % len(keys)]
@@ -196,6 +207,8 @@ class RotatingGeminiLLM:
                     raw_response = TextResponse(_normalize_content(raw_response))
                 return raw_response
             except Exception as e:
+                if isinstance(e, ValueError) and "Guest Mode requires" in str(e):
+                    raise e
                 retries += 1
                 # Rotate key and fallback model on error or rate limit
                 keys = get_gemini_keys()
@@ -227,6 +240,8 @@ class RotatingGeminiLLM:
                 client = self.get_client()
                 return client.stream(*args, **kwargs)
             except Exception as e:
+                if isinstance(e, ValueError) and "Guest Mode requires" in str(e):
+                    raise e
                 retries += 1
                 keys = get_gemini_keys()
                 if keys:
@@ -270,6 +285,8 @@ class RotatingGeminiLLM:
                     raw_response = TextResponse(_normalize_content(raw_response))
                 return raw_response
             except Exception as e:
+                if isinstance(e, ValueError) and "Guest Mode requires" in str(e):
+                    raise e
                 retries += 1
                 if GEMINI_KEYS:
                     self.key_idx = (self.key_idx + 1) % len(GEMINI_KEYS)
