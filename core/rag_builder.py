@@ -358,7 +358,8 @@ def retrieve_command_definition(command_name: str, source_filter: str = None, ma
                     results.append({
                         "source": txt_path.name,
                         "page": p_num,
-                        "text": seg
+                        "text": seg,
+                        "score": 2.0
                     })
             break  # first real command-dictionary entry per file is enough
     return results
@@ -632,6 +633,7 @@ if __name__ == "__main__":
         print(f"Testing retrieval for: '{query}'")
         res = retrieve(query)
         for i, r in enumerate(res):
-            print(f"\n[{i+1}] Score: {r['score']:.4f} | Source: {r['source']} (Page {r['page']})")
+            score_val = r.get('score', 1.0)
+            print(f"\n[{i+1}] Score: {score_val:.4f} | Source: {r['source']} (Page {r['page']})")
             print("-" * 60)
             print(r['text'])
