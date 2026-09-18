@@ -33,6 +33,9 @@ Score: <number from 0 to 10>/10
 ### ⚠️ Missing Concepts & Gaps
 - Key engineering details, commands, options, or failure modes the candidate omitted or explained inaccurately.
 
+### 🧑‍🏫 Layman's Explanation (Core Intuition)
+A simple, beginner-friendly explanation and real-world analogy of the concept tested, so the candidate intuitively understands the physics and purpose behind the mechanism.
+
 ### 💡 Model Interview Answer
 A concise, high-scoring 2-3 paragraph model answer demonstrating the exact depth expected in a semiconductor DFT interview.
 

@@ -16,13 +16,20 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Screenshot directory (where OCR'd images live)
 # Actual structure: knowledge/Tessent Atpg Core Topics/{module}.{name}/{lesson}/Screenshot (N).png
-SCREENSHOT_BASE = Path("knowledge") / "Tessent Atpg Core Topics"
+SCREENSHOT_BASES = [
+    Path("knowledge") / "Tessent Atpg Core Topics",
+    Path("knowledge") / "Tessent ATPG with TestKompress",
+    Path("knowledge") / "Tessent Shell Introduction",
+    Path("knowledge") / "Tessent ATPG Advanced Topics",
+]
+SCREENSHOT_BASE = SCREENSHOT_BASES[0]
 
 
-def _cache_path(module_num: int, image_name: str) -> Path:
+def _cache_path(module_num, image_name: str) -> Path:
     """Return the cache JSON path for a given screenshot."""
+    safe_mod = re.sub(r'[^\w\-.]', '_', str(module_num))
     safe_name = re.sub(r'[^\w\-.]', '_', image_name)
-    return CACHE_DIR / f"{module_num}_{safe_name}.json"
+    return CACHE_DIR / f"{safe_mod}_{safe_name}.json"
 
 
 def describe_diagram(image_bytes: bytes, context: str = "", mime: str = "image/png") -> str:
@@ -127,36 +134,46 @@ def find_lab_screenshots(lab_name: str, exercise: str = None) -> List[Path]:
     return matches
 
 
-def find_screenshots_for_lesson(module_num: int, lesson_title: str) -> List[Path]:
-    """Find all screenshots matching a lesson.
-
-    Looks in knowledge/Tessent Atpg Core Topics/{module_num}.*/ for images whose folder
-    matches the lesson title.
-    """
-    # Normalize lesson title for matching
+def find_screenshots_for_lesson(module_num, lesson_title: str) -> List[Path]:
+    """Find all screenshots matching a lesson across all course screenshot directories."""
     norm = lambda s: re.sub(r'[^\w]', '', s.lower())
-
     matches = []
-    if not SCREENSHOT_BASE.exists():
-        return matches
 
-    # Search pattern: Tessent Atpg Core Topics/{module_num}.*{lesson}/
-    for folder in sorted(SCREENSHOT_BASE.iterdir()):
-        if not folder.is_dir():
+    # Extract numeric portion of module (e.g. "1" from "tk_1" or "2_tk_1" or 1)
+    num_str = str(module_num).split("_")[-1]
+    if not num_str.isdigit():
+        m = re.search(r'(\d+)', str(module_num))
+        num_str = m.group(1) if m else str(module_num)
+
+    mod_str = str(module_num).lower()
+
+    # Prioritize base matching the course prefix
+    bases = list(SCREENSHOT_BASES)
+    if "tk" in mod_str or "kompress" in mod_str:
+        bases = [SCREENSHOT_BASES[1]] + [b for b in SCREENSHOT_BASES if b != SCREENSHOT_BASES[1]]
+    elif "shell" in mod_str or "tshell" in mod_str:
+        bases = [SCREENSHOT_BASES[2]] + [b for b in SCREENSHOT_BASES if b != SCREENSHOT_BASES[2]]
+    elif "adv" in mod_str:
+        bases = [SCREENSHOT_BASES[3]] + [b for b in SCREENSHOT_BASES if b != SCREENSHOT_BASES[3]]
+
+    for base in bases:
+        if not base.exists():
             continue
-        # Check if folder name starts with module number (e.g., "1.", "2.", etc.)
-        if not folder.name.startswith(f"{module_num}."):
-            continue
-        # Look for lesson subfolder
-        for subfolder in sorted(folder.iterdir()):
-            if not subfolder.is_dir():
+        for folder in sorted(base.iterdir()):
+            if not folder.is_dir():
                 continue
-            folder_norm = norm(subfolder.name)
-            lesson_norm = norm(lesson_title)
-            # Check if folder name contains lesson title or vice versa
-            if lesson_norm in folder_norm or folder_norm in lesson_norm:
-                for img in sorted(subfolder.glob("*.png")) + sorted(subfolder.glob("*.jpg")):
-                    matches.append(img)
+            if not folder.name.startswith(f"{num_str}."):
+                continue
+            for subfolder in sorted(folder.iterdir()):
+                if not subfolder.is_dir():
+                    continue
+                folder_norm = norm(subfolder.name)
+                lesson_norm = norm(lesson_title)
+                if lesson_norm in folder_norm or folder_norm in lesson_norm:
+                    for img in sorted(subfolder.glob("*.png")) + sorted(subfolder.glob("*.jpg")):
+                        matches.append(img)
+        if matches:
+            break
     return matches
 
 

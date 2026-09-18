@@ -132,7 +132,10 @@ The user's question (alongside the attached image) is:
 {question}
 
 Instructions:
-1. Provide a comprehensive, accurate answer using ONLY the reference context above.
+0. ALWAYS start your response with a dedicated section:
+   "### 🧑‍🏫 Layman's Explanation (Intuitive Analogy)"
+   Explain the core concept or what is happening in the image/question in simple, everyday layman's terms using an intuitive real-world analogy (e.g. airport luggage scanner, postal sorting, factory assembly line) so any beginner can immediately understand before reading the technical details.
+1. Provide a comprehensive, accurate technical answer using ONLY the reference context above.
 2. Cite each supporting fact with [Source: <file>, Page <N>].
 3. If a specific detail is not supported by the context, say so instead of guessing.
 4. Structure your answer with clear headings, bullet points, and comparison tables where appropriate.

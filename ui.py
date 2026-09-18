@@ -694,6 +694,14 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
                         log_deep_study("video", str(sel_num), "Whole Module", v_rep)
                 cached_video = st.session_state.get("ds_video_report_" + str(sel_num))
                 if cached_video:
+                    # Layman's explanation expander
+                    if "## Layman's Explanation" in cached_video:
+                        with st.expander("🧑‍🏫 Layman's Explanation (Beginner Friendly)", expanded=True):
+                            layman_start = cached_video.index("## Layman's Explanation")
+                            layman_end = cached_video.find("## ", layman_start + 1)
+                            if layman_end == -1:
+                                layman_end = len(cached_video)
+                            st.markdown(cached_video[layman_start:layman_end])
                     st.markdown(cached_video)
                     st.download_button(
                         "⬇️ Download report (.md)",
@@ -732,7 +740,9 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
                     if "## Layman's Explanation" in cached_lesson:
                         with st.expander("🧑‍🏫 Layman's Explanation (Beginner Friendly)", expanded=True):
                             layman_start = cached_lesson.index("## Layman's Explanation")
-                            layman_end = cached_lesson.index("## ", layman_start + 1)
+                            layman_end = cached_lesson.find("## ", layman_start + 1)
+                            if layman_end == -1:
+                                layman_end = len(cached_lesson)
                             st.markdown(cached_lesson[layman_start:layman_end])
                     # Full report
                     st.markdown(cached_lesson)
@@ -769,7 +779,7 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
     with lab_tab:
         lab_list = list_lab_exercises()
         if not lab_list:
-            st.warning("No lab exercises found under knowledge/Tessent Atpg Core Topics/10.Labs.")
+            st.warning("No lab exercises found in the knowledge base.")
         else:
             sel_lab = st.selectbox("Choose a lab exercise:", lab_list, key="ds_lab_sel")
             

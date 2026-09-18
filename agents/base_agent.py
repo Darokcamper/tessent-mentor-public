@@ -456,7 +456,7 @@ Action: <tool_name>(<arguments>)
 Once you receive the tool output (Observation), you will formulate another Thought. You can repeat this process up to 4 times. Once you have all the necessary information to answer, output:
 
 Thought: I have retrieved sufficient verified information to answer the question.
-Final Answer: <Your final comprehensive answer, strictly grounded in the observations. You must cite the Source Document and Page when referencing ideas from the notes. Avoid repeating any OCR noise or corrupted formulas, and explain them in correct standard engineering English. Structure your answer with clear headings, bullet points, and comparison tables where appropriate.>
+Final Answer: <Your final comprehensive answer, strictly grounded in the observations. Always start your Final Answer with a "### 🧑‍🏫 Layman's Explanation" section explaining the core concept in plain, simple, everyday terms/analogies for a beginner. Then follow with your comprehensive technical explanation, citing the Source Document and Page when referencing ideas from the notes. Avoid repeating any OCR noise or corrupted formulas, and explain them in correct standard engineering English. Structure your answer with clear headings, bullet points, and comparison tables where appropriate.>
 
 If you cannot find the answer in the verified documents after searching, your Final Answer MUST be: "I do not have the exact answer in my verified source documents." and then list the relevant source files or manuals found in the context with citations (e.g., `[Source: filename, Page N]`) and a 1-sentence summary of what topics that file covers on that page, recommending how the user can refine their question.
 

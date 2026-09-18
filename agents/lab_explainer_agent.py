@@ -62,6 +62,9 @@ Reference Manual Excerpts:
 
 Using ONLY the excerpts above, provide a structured markdown response covering:
 
+### 0. 🧑‍🏫 Layman's Explanation (Intuitive Analogy)
+- Explain what this command/flow does in simple, intuitive layman's terms using an intuitive real-world analogy (e.g. airport security baggage scanner, factory assembly line inspection, mail sorting, highway toll booth) so a complete beginner can immediately grasp the intuition before reading the technical details.
+
 ### 1. What the command does
 - What the command/script does, strictly based on the excerpts (cite source+page).
 

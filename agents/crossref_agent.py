@@ -64,8 +64,9 @@ def _read_text(path, cap=None):
 
 
 def _lab_keys(lab_display):
-    head = lab_display.split(" / ")[0].lower().replace(" ", "")
-    sub = lab_display.split(" / ")[1].lower().replace(" ", "") if " / " in lab_display else ""
+    clean = re.sub(r"^\[.*?\]\s*", "", lab_display)
+    head = clean.split(" / ")[0].lower().replace(" ", "")
+    sub = clean.split(" / ")[1].lower().replace(" ", "") if " / " in clean else ""
     return head, sub
 
 
@@ -88,7 +89,8 @@ def _split_pages(text):
 
 def _lab_scope_text(lab_display):
     """Lab-slides OCR pages that belong to this lab exercise."""
-    head, sub = _lab_keys(lab_display)
+    clean = re.sub(r"^\[.*?\]\s*", "", lab_display)
+    head, sub = _lab_keys(clean)
     pages = _split_pages(_read_text(LAB_SLIDES_FILE, cap=400000))
     picked = []
     for label, body in pages:
@@ -100,7 +102,8 @@ def _lab_scope_text(lab_display):
 
 def _lab_folder_text(lab_display):
     """Concatenated TCL/text file contents inside the lab folder on disk."""
-    target = LAB_DIR / lab_display.replace(" / ", "/")
+    clean = re.sub(r"^\[.*?\]\s*", "", lab_display)
+    target = LAB_DIR / clean.replace(" / ", "/")
     if not target.exists():
         return ""
     if target.is_file():

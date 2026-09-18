@@ -73,11 +73,12 @@ Question / Issue:
 {question}
 
 Instructions:
-1. Provide a comprehensive, accurate answer using ONLY the reference context above.
-2. Cite each supporting fact with [Source: <file>, Page <N>].
-3. If a specific detail is not supported by the context, say so instead of guessing.
-4. Structure your answer with clear headings, bullet points, and comparison tables where appropriate.
-5. If this question is a follow-up, maintain conversational continuity while strictly grounding technical facts in the Reference Context.
+1. Always start your response with a dedicated "### 🧑‍🏫 Layman's Explanation" section: explain the core concept, command, or issue in simple, plain, beginner-friendly terms with an intuitive everyday analogy (e.g. plumbing, highway traffic, postal mail, airport security) so anyone without deep DFT experience can grasp it immediately.
+2. Follow with a comprehensive, accurate technical answer using ONLY the reference context above.
+3. Cite each supporting fact with [Source: <file>, Page <N>].
+4. If a specific detail is not supported by the context, say so instead of guessing.
+5. Structure your answer with clear headings, bullet points, and comparison tables where appropriate.
+6. If this question is a follow-up, maintain conversational continuity while strictly grounding technical facts in the Reference Context.
 """
     return prompt
 

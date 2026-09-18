@@ -15,6 +15,49 @@ SUB_PREFIX = "atpg_video_subs__"
 SLIDE_PREFIX = "atpg_video_slides__"
 LAB_SLIDES_FILE = "atpg_video_slides__10_labs.txt"
 
+COURSES = [
+    {
+        "id": "atpg",
+        "order": 1,
+        "name": "ATPG Core Topics",
+        "sub_prefix": "atpg_video_subs__",
+        "slide_prefix": "atpg_video_slides__",
+        "lab_wkb": "Tessent_ATPG_Core_Topics_lab_wkbk_2025.4_s.txt",
+        "lab_slides": "atpg_video_slides__10_labs.txt",
+        "lab_dir": Path("knowledge") / "Tessent Atpg Core Topics" / "10.Labs",
+    },
+    {
+        "id": "tk",
+        "order": 2,
+        "name": "ATPG with TestKompress",
+        "sub_prefix": "tk_video_subs__",
+        "slide_prefix": "tk_video_slides__",
+        "lab_wkb": "Tessent_ATPG_with_TestKompress_lab_wkb_2025.4_s.txt",
+        "lab_slides": None,
+        "lab_dir": Path("knowledge") / "Tessent ATPG with TestKompress" / "8.Labs",
+    },
+    {
+        "id": "tshell_intro",
+        "order": 3,
+        "name": "Tessent Shell Introduction",
+        "sub_prefix": "tshell_intro_video_subs__",
+        "slide_prefix": "tshell_intro_video_slides__",
+        "lab_wkb": "Tessent_Shell_Introduction_lab_wkb_2026.1_s.txt",
+        "lab_slides": None,
+        "lab_dir": Path("knowledge") / "Tessent Shell Introduction" / "7.Labs",
+    },
+    {
+        "id": "atpg_adv",
+        "order": 4,
+        "name": "ATPG Advanced Topics",
+        "sub_prefix": "atpg_adv_video_subs__",
+        "slide_prefix": "atpg_adv_video_slides__",
+        "lab_wkb": "Tessent_ATPG_Advanced_Topics_lab_wkb_2025.4_s.txt",
+        "lab_slides": None,
+        "lab_dir": Path("knowledge") / "Tessent ATPG Advanced Topics" / "5.Labs",
+    },
+]
+
 
 def _read_text(path, cap=None):
     try:
@@ -27,38 +70,124 @@ def _read_text(path, cap=None):
     return text
 
 
-def _module_name(fname):
-    stem = fname[len(SUB_PREFIX):-4]
-    num, _, title = stem.partition("_")
-    if num.isdigit():
-        return int(num), title.replace("_", " ").title()
-    return None, stem.replace("_", " ").title()
+def _resolve_module_files(module_key):
+    """Resolves module_key (string or int) to (sub_path, slide_path, course_name, module_title)."""
+    m_str = str(module_key).strip()
+
+    # 1. Backward compatibility: pure numeric int or string (e.g. 1..8)
+    if m_str.isdigit():
+        target_num = int(m_str)
+        c = COURSES[0]
+        sub_matches = sorted(KNOWLEDGE_TXT_DIR.glob(c["sub_prefix"] + f"{target_num}_*.txt"))
+        slide_matches = sorted(KNOWLEDGE_TXT_DIR.glob(c["slide_prefix"] + f"{target_num}_*.txt"))
+        sub_p = sub_matches[0] if sub_matches else None
+        slide_p = slide_matches[0] if slide_matches else None
+        title = ""
+        if sub_p:
+            stem = sub_p.name[len(c["sub_prefix"]):-4]
+            _, _, t = stem.partition("_")
+            title = t.replace("_", " ").title()
+        return sub_p, slide_p, c["name"], f"Module {target_num}: {title}".strip(": ")
+
+    # 2. Key format '{order}_{course_id}_{num}' (e.g. '1_atpg_01', '2_tk_03')
+    for c in COURSES:
+        prefix_tag = f"{c['order']}_{c['id']}_"
+        if m_str.startswith(prefix_tag):
+            num_part = m_str[len(prefix_tag):]
+            if num_part.isdigit():
+                num = int(num_part)
+                sub_matches = sorted(KNOWLEDGE_TXT_DIR.glob(c["sub_prefix"] + f"{num}_*.txt"))
+                slide_matches = sorted(KNOWLEDGE_TXT_DIR.glob(c["slide_prefix"] + f"{num}_*.txt"))
+                sub_p = sub_matches[0] if sub_matches else None
+                slide_p = slide_matches[0] if slide_matches else None
+                title = ""
+                if sub_p:
+                    stem = sub_p.name[len(c["sub_prefix"]):-4]
+                    _, _, t = stem.partition("_")
+                    title = t.replace("_", " ").title()
+                return sub_p, slide_p, c["name"], f"Module {num}: {title}".strip(": ")
+
+    # 3. Fallback search by substring or filename
+    for c in COURSES:
+        sub_matches = sorted(KNOWLEDGE_TXT_DIR.glob(c["sub_prefix"] + f"*{m_str}*.txt"))
+        if sub_matches:
+            slide_matches = sorted(KNOWLEDGE_TXT_DIR.glob(c["slide_prefix"] + f"*{m_str}*.txt"))
+            return sub_matches[0], (slide_matches[0] if slide_matches else None), c["name"], sub_matches[0].stem
+
+    return None, None, "Tessent", str(module_key)
 
 
 def list_video_modules():
-    """Returns {num: display} for every video transcript found."""
+    """Returns {key: display} for every video transcript across all 4 courses."""
     mods = {}
-    if KNOWLEDGE_TXT_DIR.exists():
-        for p in sorted(KNOWLEDGE_TXT_DIR.glob(SUB_PREFIX + "*.txt")):
-            num, title = _module_name(p.name)
-            if num is not None:
-                mods[num] = "Module " + str(num) + ": " + title
+    if not KNOWLEDGE_TXT_DIR.exists():
+        return mods
+    for c in COURSES:
+        prefix = c["sub_prefix"]
+        for p in sorted(KNOWLEDGE_TXT_DIR.glob(prefix + "*.txt")):
+            stem = p.name[len(prefix):-4]
+            num_str, _, title = stem.partition("_")
+            if num_str.isdigit():
+                num = int(num_str)
+                key = f"{c['order']}_{c['id']}_{num:02d}"
+                display = f"[{c['name']}] Module {num}: " + title.replace("_", " ").title()
+                mods[key] = display
     return mods
 
 
 def list_lab_exercises():
-    """Returns display names for every lab exercise folder on disk."""
+    """Returns display names for every lab exercise across all 4 courses."""
     labs = []
+
+    # 1. ATPG Core Topics (from disk folder)
     base = Path("knowledge") / "Tessent Atpg Core Topics" / "10.Labs"
     if base.exists():
         for lab_dir in sorted(base.iterdir()):
             if not lab_dir.is_dir():
                 continue
             for ex_dir in sorted(lab_dir.iterdir()):
-                if ex_dir.is_dir():
-                    labs.append(lab_dir.name + " / " + ex_dir.name)
-                elif ex_dir.suffix.lower() in (".tcl", ".txt", ".doc", ".docx", ".pdf"):
-                    labs.append(lab_dir.name + " / " + ex_dir.name)
+                if ex_dir.is_dir() or ex_dir.suffix.lower() in (".tcl", ".txt", ".doc", ".docx", ".pdf"):
+                    labs.append(f"[ATPG Core] {lab_dir.name} / {ex_dir.name}")
+
+    # 2. ATPG with TestKompress (from official workbook)
+    tk_labs = [
+        "[TestKompress] Lab 2 / Exercise 1: Tessent TestKompress Logic TSDB Flow",
+        "[TestKompress] Lab 2 / Exercise 2: Tessent TestKompress Logic Options (Optional)",
+        "[TestKompress] Lab 3 / Exercise 1: Debugging Scan Chain Input (K19)",
+        "[TestKompress] Lab 3 / Exercise 2: Debugging Lockup Cells (K19)",
+        "[TestKompress] Lab 3 / Exercise 3: Debugging the Mask Register (K22)",
+        "[TestKompress] Lab 3 / Exercise 4: Debugging an F22 DRC Violation",
+        "[TestKompress] Lab 3 / Exercise 5: Automatic Simulation Mismatch",
+        "[TestKompress] Lab 4 / Exercise 1: Experimenting With Compression Strategies",
+        "[TestKompress] Lab 4 / Exercise 2: VersaPoint Test Points",
+        "[TestKompress] Lab 5 / Exercise 1: TCD Flow ATPG",
+    ]
+    labs.extend(tk_labs)
+
+    # 3. Tessent Shell Introduction (from official workbook)
+    tshell_labs = [
+        "[Tessent Shell] Lab 1 / Exercise 1: Tessent Startup File",
+        "[Tessent Shell] Lab 1 / Exercise 2: Basic Commands",
+        "[Tessent Shell] Lab 2 / Exercise 1: Explore the Design Using Tessent Visualizer",
+        "[Tessent Shell] Lab 3 / Exercise 1: Special Characters and Syntax Conventions",
+        "[Tessent Shell] Lab 3 / Exercise 2: Help within Tessent Tools",
+        "[Tessent Shell] Lab 4 / Exercise 1: Introspection Commands",
+        "[Tessent Shell] Lab 5 / Exercise 1: Using the Tessent Online Documentation",
+        "[Tessent Shell] Lab 5 / Exercise 2: Using the Support Center",
+    ]
+    labs.extend(tshell_labs)
+
+    # 4. ATPG Advanced Topics (from official workbook)
+    adv_labs = [
+        "[ATPG Advanced] Lab 1 / Exercise 1: Creating UDFM Test Patterns",
+        "[ATPG Advanced] Lab 1 / Exercise 2: Creating IDDQ Patterns",
+        "[ATPG Advanced] Lab 1 / Exercise 3: Creating Toggle Aware Patterns",
+        "[ATPG Advanced] Lab 2 / Exercise 1: Troubleshooting Low Test Coverage",
+        "[ATPG Advanced] Lab 3 / Exercise 1: Automated Debugging of Simulation Mismatches",
+        "[ATPG Advanced] Lab 3 / Exercise 2: Manual Simulation Mismatch Debug (Optional)",
+    ]
+    labs.extend(adv_labs)
+
     return labs
 
 
@@ -231,14 +360,12 @@ MANUAL EXCERPTS:
 
 def explain_video_lesson(module_num, top_k=12):
     """Generates the deep-study report for one video module."""
-    matches = sorted(KNOWLEDGE_TXT_DIR.glob(SUB_PREFIX + str(module_num) + "_*.txt"))
-    if not matches:
+    sub_path, slide_path, course_name, mod_title = _resolve_module_files(module_num)
+    if not sub_path or not sub_path.exists():
         return "No transcript found for module " + str(module_num)
-    display = list_video_modules().get(module_num, "Module " + str(module_num))
-    transcript = _read_text(matches[0], cap=24000)
-
-    slides = sorted(KNOWLEDGE_TXT_DIR.glob(SLIDE_PREFIX + str(module_num) + "_*.txt"))
-    slide_text = _read_text(slides[0], cap=12000) if slides else ""
+    display = f"[{course_name}] {mod_title}"
+    transcript = _read_text(sub_path, cap=24000)
+    slide_text = _read_text(slide_path, cap=12000) if slide_path and slide_path.exists() else ""
 
     query = "Tessent " + display + " " + transcript[:600]
     context = _format_chunks(retrieve(query, top_k=top_k))
@@ -248,28 +375,78 @@ def explain_video_lesson(module_num, top_k=12):
         context=context,
     )
     report = _llm(prompt)
-    log_deep_study("video", display, matches[0].name, report)
+    log_deep_study("video", display, sub_path.name, report)
     return report
 
 
 def _lab_source_text(lab_display):
-    """Collects slide pages and TCL/text files belonging to one lab exercise."""
-    head = lab_display.split(" / ")[0].lower().replace(" ", "")
-    sub = ""
-    if " / " in lab_display:
-        sub = lab_display.split(" / ")[1].lower().replace(" ", "")
+    """Collects workbook text, slide pages, and TCL/text files for one lab exercise."""
+    import re
+    raw = lab_display
+    course_tag = ""
+    if raw.startswith("[") and "]" in raw:
+        course_tag, _, raw = raw.partition("]")
+        course_tag = course_tag.strip("[").strip()
+        raw = raw.strip()
+
+    # Determine course workbook and paths
+    wkb_file = "Tessent_ATPG_Core_Topics_lab_wkbk_2025.4_s.txt"
+    slides_file = LAB_SLIDES_FILE
+    disk_dir = Path("knowledge") / "Tessent Atpg Core Topics" / "10.Labs"
+
+    if "testkompress" in course_tag.lower() or "testkompress" in lab_display.lower():
+        wkb_file = "Tessent_ATPG_with_TestKompress_lab_wkb_2025.4_s.txt"
+        slides_file = None
+        disk_dir = Path("knowledge") / "Tessent ATPG with TestKompress" / "8.Labs"
+    elif "shell" in course_tag.lower() or "tshell" in lab_display.lower():
+        wkb_file = "Tessent_Shell_Introduction_lab_wkb_2026.1_s.txt"
+        slides_file = None
+        disk_dir = Path("knowledge") / "Tessent Shell Introduction" / "7.Labs"
+    elif "advanced" in course_tag.lower() or "adv" in lab_display.lower():
+        wkb_file = "Tessent_ATPG_Advanced_Topics_lab_wkb_2025.4_s.txt"
+        slides_file = None
+        disk_dir = Path("knowledge") / "Tessent ATPG Advanced Topics" / "5.Labs"
+
+    head = raw.split(" / ")[0].lower().replace(" ", "")
+    sub = raw.split(" / ")[1].lower().replace(" ", "") if " / " in raw else ""
 
     picked = []
-    pages = _split_pages(_read_text(KNOWLEDGE_TXT_DIR / LAB_SLIDES_FILE))
-    for label, body in pages:
-        blob = (label + "\n" + body).lower().replace(" ", "")
-        if (head and head in blob) or (sub and sub in blob):
-            picked.append(body)
+
+    # 1. Slide pages if available (ATPG Core)
+    if slides_file and (KNOWLEDGE_TXT_DIR / slides_file).exists():
+        pages = _split_pages(_read_text(KNOWLEDGE_TXT_DIR / slides_file))
+        for label, body in pages:
+            blob = (label + "\n" + body).lower().replace(" ", "")
+            if (head and head in blob) or (sub and sub in blob):
+                picked.append(body)
+
+    # 2. Workbook text
+    wkb_path = KNOWLEDGE_TXT_DIR / wkb_file
+    if wkb_path.exists():
+        wkb_text = _read_text(wkb_path)
+        blocks = _split_blocks(wkb_text)
+        m_lab = re.search(r'lab\s*(\d+)', raw, re.I)
+        m_ex = re.search(r'ex(?:ercise)?\s*(\d+)', raw, re.I)
+        lab_num = m_lab.group(1) if m_lab else ""
+        ex_num = m_ex.group(1) if m_ex else ""
+
+        for b in blocks:
+            b_low = b.lower().replace(" ", "")
+            match_lab = f"lab{lab_num}" in b_low if lab_num else True
+            match_ex = (f"exercise{ex_num}" in b_low or f"ex{ex_num}" in b_low) if ex_num else True
+
+            if match_lab and match_ex and (len(picked) < 15):
+                picked.append(b.strip())
+            elif sub and sub in b_low and (len(picked) < 15):
+                picked.append(b.strip())
+
     text = "\n\n".join(picked)
 
+    # 3. Disk folder files (scripts, inputs, TCL) if available
     extra = ""
-    base = Path("knowledge") / "Tessent Atpg Core Topics" / "10.Labs"
-    target = base / lab_display.replace(" / ", "/")
+    target = disk_dir / raw.replace(" / ", "/")
+    if not target.exists():
+        target = disk_dir / raw.split(" / ")[0].strip()
     if target.exists():
         if target.is_file():
             extra = _read_text(target, cap=20000)
@@ -279,6 +456,7 @@ def _lab_source_text(lab_display):
                 if p.is_file() and p.suffix.lower() in (".tcl", ".txt", ".do", ".f"):
                     files.append("--- " + p.name + " ---\n" + _read_text(p, cap=8000))
             extra = "\n\n".join(files)
+
     return (text + "\n\n" + extra).strip()
 
 
@@ -440,32 +618,12 @@ def generate_lesson_ppt_from_report(module_num, lesson_title, report, diagram_de
 
 
 def list_lab_files_at_once(lab_name: str) -> dict:
-    """List ALL files (screenshots, TCL, text, etc.) for a lab at once.
+    """List ALL files (screenshots, TCL, text, etc.) for a lab at once."""
+    import re
+    clean_name = re.sub(r"^\[.*?\]\s*", "", lab_name).strip()
 
-    Returns:
-        Dict with structure:
-        {
-            "lab_name": "Lab2",
-            "exercises": {
-                "EX1": {
-                    "screenshots": [Path, ...],
-                    "tcl_files": [Path, ...],
-                    "text_files": [Path, ...],
-                    "all_files": [Path, ...]
-                },
-                "EX2": { ... },
-                ...
-            },
-            "total_screenshots": 25,
-            "total_tcl": 3,
-            "total_text": 2
-        }
-    """
-    from agents.diagram_vision import find_lab_screenshots, SCREENSHOT_BASE
-
-    labs_base = SCREENSHOT_BASE / "10.Labs"
     result = {
-        "lab_name": lab_name,
+        "lab_name": clean_name,
         "exercises": {},
         "total_screenshots": 0,
         "total_tcl": 0,
@@ -473,10 +631,15 @@ def list_lab_files_at_once(lab_name: str) -> dict:
     }
 
     lab_folder = None
-    for folder in labs_base.iterdir():
-        if folder.is_dir() and folder.name.lower() == lab_name.lower():
-            lab_folder = folder
-            break
+    for c in COURSES:
+        base = c["lab_dir"]
+        if base.exists():
+            for folder in base.iterdir():
+                if folder.is_dir() and folder.name.lower() == clean_name.lower():
+                    lab_folder = folder
+                    break
+            if lab_folder:
+                break
 
     if not lab_folder:
         return result
@@ -575,11 +738,11 @@ def _titles_match(a, b):
 
 def list_video_lessons(module_num):
     """Returns the ordered individual lesson titles for one video module."""
-    matches = sorted(KNOWLEDGE_TXT_DIR.glob(SUB_PREFIX + str(module_num) + "_*.txt"))
-    if not matches:
+    sub_path, _, _, _ = _resolve_module_files(module_num)
+    if not sub_path or not sub_path.exists():
         return []
     titles = []
-    for block in _split_blocks(_read_text(matches[0])):
+    for block in _split_blocks(_read_text(sub_path)):
         title = _lesson_title_from_source(_block_source(block))
         if title:
             titles.append(title)
@@ -588,11 +751,11 @@ def list_video_lessons(module_num):
 
 def _lesson_block(module_num, lesson_title):
     """Returns the transcript body of ONE lesson block."""
-    matches = sorted(KNOWLEDGE_TXT_DIR.glob(SUB_PREFIX + str(module_num) + "_*.txt"))
-    if not matches:
+    sub_path, _, _, _ = _resolve_module_files(module_num)
+    if not sub_path or not sub_path.exists():
         return ""
     wanted = _norm_title(lesson_title)
-    for block in _split_blocks(_read_text(matches[0])):
+    for block in _split_blocks(_read_text(sub_path)):
         if _norm_title(_lesson_title_from_source(_block_source(block))) == wanted:
             body = block
             if body.strip().startswith("[SOURCE:"):
@@ -603,11 +766,11 @@ def _lesson_block(module_num, lesson_title):
 
 def _slides_for_lesson(module_num, lesson_title):
     """Collects slide-page bodies whose folder matches the lesson title."""
-    slides = sorted(KNOWLEDGE_TXT_DIR.glob(SLIDE_PREFIX + str(module_num) + "_*.txt"))
-    if not slides:
+    _, slide_path, _, _ = _resolve_module_files(module_num)
+    if not slide_path or not slide_path.exists():
         return ""
     picked = []
-    for block in _split_blocks(_read_text(slides[0])):
+    for block in _split_blocks(_read_text(slide_path)):
         parts = _block_source(block).split("/")
         folder = parts[1] if len(parts) >= 2 else (parts[0] if parts else "")
         if folder and _titles_match(lesson_title, folder):
@@ -632,7 +795,8 @@ def lesson_slug(text, limit=40):
 
 def explain_video_lesson_detail(module_num, lesson_title, top_k=12):
     """Generates the deep-study report for ONE individual video lesson."""
-    display = list_video_modules().get(module_num, "Module " + str(module_num))
+    sub_path, slide_path, course_name, mod_title = _resolve_module_files(module_num)
+    display = f"[{course_name}] {mod_title}"
     transcript = _lesson_block(module_num, lesson_title)
     if not transcript:
         return "No transcript block found for lesson: " + lesson_title
@@ -664,7 +828,8 @@ def explain_video_lesson_detail_v2(module_num, lesson_title, top_k=12, generate_
     from agents.srt_analyzer import analyze_text
     from agents.ppt_generator import generate_lesson_ppt
 
-    display = list_video_modules().get(module_num, "Module " + str(module_num))
+    sub_path, slide_path, course_name, mod_title = _resolve_module_files(module_num)
+    display = f"[{course_name}] {mod_title}"
     transcript = _lesson_block(module_num, lesson_title)
     if not transcript:
         return "No transcript block found for lesson: " + lesson_title, None, ""
