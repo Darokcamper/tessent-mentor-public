@@ -187,6 +187,26 @@ def verify_bundle_digest(data: bytes, expected: str) -> tuple:
     return True, "ok"
 
 
+def _warn_token_shape(token: str, name: str = "KB_BUNDLE_TOKEN") -> None:
+    """Warn about token *formatting* problems without ever logging the value.
+
+    Copy/paste mistakes in a secrets editor are the most common cause of a 401/403:
+    surrounding quotes, a trailing newline, or the 'Bearer ' prefix included in the
+    value. Only the shape is described, never the secret.
+    """
+    if not token:
+        return
+    if token != token.strip():
+        _log(f"WARNING: {name} has leading/trailing whitespace - remove it in Secrets")
+    if token[:1] in {"'", '"'} or token[-1:] in {"'", '"'}:
+        _log(f"WARNING: {name} appears to be wrapped in quotes - store the bare value")
+    if token.lower().startswith("bearer "):
+        _log(f"WARNING: {name} already starts with 'Bearer ' - store only the token")
+    if not (token.startswith("github_pat_") or token.startswith("ghp_")):
+        _log(f"WARNING: {name} does not look like a GitHub PAT "
+             "(expected 'github_pat_...' or 'ghp_...')")
+
+
 def missing_secrets() -> list:
     """Return a list of required secrets that are NOT configured.
     
@@ -270,7 +290,12 @@ def _resolve_latest_tag(owner: str, repo: str) -> str:
 
 
 def _get_asset_id(owner: str, repo: str, tag: str, asset_name: str, token: str = ""):
-    """Get the asset ID for a release asset via GitHub API."""
+    """Get the asset ID for a release asset via GitHub API.
+
+    On an HTTP failure this logs the status, GitHub's own message and an
+    actionable hint, then raises RuntimeError so the caller can degrade instead of
+    crashing the app. The token value is never logged.
+    """
     api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
     req = urllib.request.Request(api_url)
     req.add_header("Accept", "application/vnd.github+json")
@@ -279,11 +304,35 @@ def _get_asset_id(owner: str, repo: str, tag: str, asset_name: str, token: str =
         token = _get_github_token()
     if token:
         req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-        for asset in data.get("assets", []):
-            if asset.get("name") == asset_name:
-                return asset.get("id")
+
+    _hints = {
+        401: "the token is invalid, expired or revoked - issue a new one",
+        403: "the token is valid but not authorised: set 'Contents: Read' and include "
+             "this repository in the token's repository access",
+        404: "the repository or release tag is not visible to this token "
+             "(wrong repository access, or the release is a draft)",
+    }
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        _log(f"FAILED to read release metadata: HTTP {exc.code} {exc.reason}")
+        hint = _hints.get(exc.code)
+        if hint:
+            _log(f"hint: {hint}")
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:300].strip()
+        except Exception:
+            body = ""
+        if body:
+            _log(f"github said: {body}")
+        raise RuntimeError(f"release metadata unavailable (HTTP {exc.code})") from exc
+
+    for asset in data.get("assets", []):
+        if asset.get("name") == asset_name:
+            return asset.get("id")
+    _log(f"asset '{asset_name}' is not present in release '{tag}' "
+         f"(available: {', '.join(a.get('name', '?') for a in data.get('assets', [])) or 'none'})")
     return None
 
 
@@ -339,6 +388,7 @@ def restore_knowledge() -> bool:
 
     _log(f"downloading bundle: {kb_url}")
     _log("bundle download credential: KB_BUNDLE_TOKEN")
+    _warn_token_shape(token)
     if not expected_bundle_sha256():
         _log("WARNING: KB_BUNDLE_SHA256 is not configured - the downloaded bundle will be")
         _log("         rejected before extraction; set it to the digest printed by")
@@ -371,7 +421,14 @@ def restore_knowledge() -> bool:
         # between our fast-path check and lock acquisition.
         if MARKER.exists() or restore_done():
             return True
-        return _do_restore(kb_url, token)
+        try:
+            return _do_restore(kb_url, token)
+        except Exception as exc:                  # noqa: BLE001 - never crash the app
+            # Belt and braces: the documented contract is that a restore problem
+            # leaves the app usable (degraded), never a traceback in ui.py.
+            _log(f"FAILED during restore: {type(exc).__name__}: {exc}")
+            _log("app will boot WITHOUT the private knowledge base (RAG/Exam Bank degraded)")
+            return False
     finally:
         if lock_fd is not None:
             try:
@@ -404,7 +461,13 @@ def _do_restore(kb_url: str, token: str) -> bool:
         return False
 
     _log("fetching asset ID via GitHub API...")
-    asset_id = _get_asset_id(owner, repo, tag, asset_name)
+    try:
+        asset_id = _get_asset_id(owner, repo, tag, asset_name)
+    except Exception as exc:                      # noqa: BLE001 - must never crash the app
+        # Contract: a restore failure degrades the app, it never raises into ui.py.
+        _log(f"FAILED to read release metadata: {type(exc).__name__}: {exc}")
+        _log("app will boot WITHOUT the private knowledge base (RAG/Exam Bank degraded)")
+        return False
     if not asset_id:
         _log(f"ERROR: asset '{asset_name}' not found in release {tag}")
         _log("app will boot WITHOUT the private knowledge base (RAG/Exam Bank degraded)")
