@@ -292,10 +292,88 @@ def search_txt_files_fallback(query, top_k=5):
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:top_k]
 
+# --- WP-2: definition caching -------------------------------------------------
+# The expanded index covers ~930 commands. Without caching, every rendered
+# command row re-read and re-scanned the 10.7 MB reference manual (~2-3 s each).
+# Both caches are keyed on observable corpus state, so a test that redirects
+# TXT_DIR (tests/test_followup1_break.py) or a knowledge-base upload that adds a
+# file can never be served a stale answer.
+
+_CORPUS_TEXT_CACHE: dict = {}
+_CORPUS_TEXT_CACHE_LIMIT = 8
+_DEFINITION_CACHE: dict = {}
+_DEFINITION_CACHE_LIMIT = 512
+
+
+def _read_corpus_text(path):
+    """Read a cached page-text file once per (path, mtime, size)."""
+    from pathlib import Path as _Path
+
+    path = _Path(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    cached = _CORPUS_TEXT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    if len(_CORPUS_TEXT_CACHE) >= _CORPUS_TEXT_CACHE_LIMIT:
+        _CORPUS_TEXT_CACHE.clear()
+    _CORPUS_TEXT_CACHE[key] = text
+    return text
+
+
+def _corpus_fingerprint():
+    """Cheap, observable identity of the current corpus directory."""
+    try:
+        files = list(TXT_DIR.glob("*.txt"))
+    except OSError:
+        return (str(TXT_DIR), 0, 0)
+    latest = 0
+    for item in files:
+        try:
+            latest = max(latest, item.stat().st_mtime_ns)
+        except OSError:
+            pass
+    return (str(TXT_DIR), len(files), latest)
+
+
 def retrieve_command_definition(command_name: str, source_filter: str = None, max_chars: int = 7000):
+    """Cached wrapper around :func:`_retrieve_command_definition_uncached`.
+
+    Returns a fresh list of fresh dicts on every call, so callers that sort or
+    annotate the result (``retrieve()`` sorts the block by source and page) can
+    never mutate the cache.
+    """
+    if not command_name or not str(command_name).strip():
+        return []
+    key = (
+        str(command_name).strip().lower(),
+        str(source_filter or "").strip().lower(),
+        int(max_chars),
+        _corpus_fingerprint(),
+    )
+    cached = _DEFINITION_CACHE.get(key)
+    if cached is not None:
+        return [dict(item) for item in cached]
+
+    result = _retrieve_command_definition_uncached(
+        command_name, source_filter=source_filter, max_chars=max_chars
+    )
+    if len(_DEFINITION_CACHE) >= _DEFINITION_CACHE_LIMIT:
+        _DEFINITION_CACHE.clear()
+    _DEFINITION_CACHE[key] = [dict(item) for item in result]
+    return result
+
+
+def _retrieve_command_definition_uncached(command_name: str, source_filter: str = None, max_chars: int = 7000):
     """
     Command-dictionary-aware retrieval.
-
     Scans the cached page text (knowledge/txt/*.txt) for the given Tessent command name
     and returns the CONTIGUOUS manual block for that command (heading through to the next
     command heading or page boundary), so the full Usage/Arguments list arrives as one piece.
@@ -308,42 +386,89 @@ def retrieve_command_definition(command_name: str, source_filter: str = None, ma
     if not command_name:
         return []
     name_lower = command_name.strip().lower()
-    results = []
 
-    txt_files = sorted(TXT_DIR.glob("*.txt"))
-    for txt_path in txt_files:
-        if source_filter:
-            src_lower = txt_path.name.lower()
-            sf = source_filter.lower()
-            # match if the filter text appears in the filename
-            if sf not in src_lower and sf.strip(".txt").lower() not in src_lower:
+    # Formulate candidates: exact name first, then common inflections (e.g. singular -> plural)
+    candidates = [name_lower]
+    if not name_lower.endswith("s"):
+        if name_lower.endswith("box"):
+            candidates.append(name_lower + "es")
+        else:
+            candidates.append(name_lower + "s")
+    elif name_lower.endswith("s"):
+        # Handle cases where the query is already pluralized but the canonical command is singular.
+        # Example: 'read_cell_libs' -> 'read_cell_library'
+        # Note: This is a simple heuristic; complex irregular plurals may still require alias mapping.
+        stem = name_lower[:-1]
+        if stem.endswith("lib"):
+            candidates.append(stem + "rary") # read_cell_libs -> read_cell_library
+        else:
+            candidates.append(stem)
+
+    # Common section headings inside manual entries that must not be treated as command boundaries
+    non_command_headings = {"usage", "syntax", "description", "arguments", "options", "examples", "related", "note", "mode", "prerequisites", "context"}
+
+    # Prioritize reference manuals (tshell_ref) first, matching baseline behavior
+    txt_files = sorted(
+        TXT_DIR.glob("*.txt"),
+        key=lambda p: (0 if "tshell_ref" in p.name.lower() else (1 if "ref" in p.name.lower() or "manual" in p.name.lower() else 2), p.name)
+    )
+
+    for candidate in candidates:
+        results = []
+        for txt_path in txt_files:
+            if source_filter:
+                src_lower = txt_path.name.lower()
+                sf = source_filter.lower()
+                # match if the filter text appears in the filename
+                if sf not in src_lower and sf.strip(".txt").lower() not in src_lower:
+                    continue
+            text = _read_corpus_text(txt_path)
+            if text is None:
                 continue
-        try:
-            text = txt_path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
 
-        # Map absolute character offsets to physical page numbers using the
-        # page markers emitted by the extractor ("--- PAGE N ---").
-        page_spans = []  # (start_offset_of_page_text, page_num)
-        for pm in re.finditer(r"--- PAGE (\d+) ---\n?", text):
-            page_spans.append((pm.end(), int(pm.group(1))))
+            # Map absolute character offsets to physical page numbers using the
+            # page markers emitted by the extractor ("--- PAGE N ---").
+            page_spans = []  # (start_offset_of_page_text, page_num)
+            for pm in re.finditer(r"--- PAGE (\d+) ---\n?", text):
+                page_spans.append((pm.end(), int(pm.group(1))))
 
-        # Find the command heading in the whole file (so the captured block can
-        # extend across page boundaries instead of stopping at the page edge).
-        for m in re.finditer(re.escape(name_lower), text.lower()):
-            # Must start its own line (command dictionary headings do).
-            line_start = text.rfind("\n", 0, m.start()) + 1
-            if text[line_start:m.start()].strip():
-                continue
-            # Real entries are immediately followed by "Context:" or "Note -";
-            # this skips mid-sentence mentions and TOC-like references.
-            nxt = text[m.end():].lstrip(" \t\r\n")
-            if not nxt.startswith("Context:") and not nxt.startswith("Note -"):
+            # Find genuine command dictionary entry
+            # Match entry heading line followed by Context: (or fallback Mode:/Usage/Syntax)
+            m = re.search(rf"\n{re.escape(candidate)}\s*\n\s*Context:", text, re.IGNORECASE)
+            if not m:
+                m = re.search(rf"\n{re.escape(candidate)}\s*\n\s*(?:Mode:|Usage\b|Syntax\b)", text, re.IGNORECASE)
+            if not m:
                 continue
 
-            block_start = m.start()
-            block_end = block_start + max_chars
+            block_start = m.start() + 1  # Skip the leading newline
+
+            # Find where the NEXT genuine command entry begins
+            # The next entry is a different command heading followed by Context:
+            entry_end = len(text)
+            for ne in re.finditer(r"\n([a-z0-9_]+)\s*\n\s*Context:", text[m.end():], re.IGNORECASE):
+                next_cmd = ne.group(1).lower()
+                # Do not terminate on repetitions of the current command name, inflections, or internal section headers
+                if (
+                    next_cmd != candidate
+                    and next_cmd != name_lower
+                    and next_cmd not in candidates
+                    and next_cmd not in non_command_headings
+                ):
+                    next_cmd_pos = m.end() + ne.start()
+                    # Snap to the physical page boundary marker preceding the next command entry
+                    pm_pos = text.rfind("--- PAGE ", m.end(), next_cmd_pos)
+                    if pm_pos > m.end():
+                        entry_end = pm_pos
+                    else:
+                        entry_end = next_cmd_pos + 1
+                    break
+
+            block_end = min(block_start + max_chars, entry_end)
+            # Snap to last line break if capped by max_chars to prevent mid-token truncation
+            if block_end < entry_end:
+                last_nl = text.rfind("\n", block_start, block_end)
+                if last_nl > block_start:
+                    block_end = last_nl
 
             # Emit the contiguous block in per-page pieces so every piece keeps
             # the correct page citation, even when the entry spans 2+ pages.
@@ -354,17 +479,90 @@ def retrieve_command_definition(command_name: str, source_filter: str = None, ma
                 if seg_start >= seg_end:
                     continue
                 seg = text[seg_start:seg_end].strip()
-                if seg:
-                    results.append({
-                        "source": txt_path.name,
-                        "page": p_num,
-                        "text": seg,
-                        "score": 2.0
-                    })
-            break  # first real command-dictionary entry per file is enough
-    return results
+                if not seg:
+                    continue
+                # Ignore segments that contain only the running page header/footer
+                seg_lines = [ln.strip() for ln in seg.splitlines() if ln.strip()]
+                if all(
+                    ln.isdigit() or "tessent" in ln.lower() or "command dictionary" in ln.lower() or "reference manual" in ln.lower()
+                    for ln in seg_lines
+                ):
+                    continue
+                results.append({
+                    "source": txt_path.name,
+                    "page": p_num,
+                    "text": seg,
+                    "score": 2.0
+                })
+            # Removed early break to accumulate definitions across multiple manual files.
+        if results:
+            return results
+    return []
+
+# ── WP-A: command-token detection coverage ──────────────────────────────────
+# The historical hard-coded verb list omitted verbs that exist in the corpus
+# ('identify', 'extract', …), so questions about identify_redundant_faults or
+# extract_icl never reached the command-dictionary fast path. The verb set is now
+# derived from the active command index, so a newly indexed verb cannot be missed.
+# The historical list is kept as the fallback for deployments without an index.
+
+_HISTORICAL_COMMAND_VERBS = (
+    "set|add|create|remove|delete|write|read|report|get|put|check|run|save|do|exit|"
+    "source|define|insert|analyze"
+)
+_COMMAND_PATTERN_CACHE: dict = {}
+
+
+def _command_token_pattern():
+    """Compiled regex matching ``verb_noun`` command tokens in a question."""
+    try:
+        from core.command_indexer import load_command_index
+
+        commands = load_command_index().get("commands", {})
+        key = ("index", len(commands), id(commands))
+    except Exception:
+        commands, key = {}, ("fallback",)
+
+    pattern = _COMMAND_PATTERN_CACHE.get(key)
+    if pattern is not None:
+        return pattern
+
+    verbs = sorted({name.split("_", 1)[0] for name in commands if "_" in name and name})
+    if not verbs:
+        verbs = _HISTORICAL_COMMAND_VERBS.split("|")
+    pattern = re.compile(r"\b(?:" + "|".join(re.escape(verb) for verb in verbs) + r")_[a-z0-9_]+\b")
+    if len(_COMMAND_PATTERN_CACHE) > 4:
+        _COMMAND_PATTERN_CACHE.clear()
+    _COMMAND_PATTERN_CACHE[key] = pattern
+    return pattern
+
+
+def _thesaurus_enabled() -> bool:
+    """WP-E switch: concept→command assistance is on unless explicitly disabled."""
+    return os.environ.get("VM_DISABLE_CONCEPT_THESAURUS", "").strip() not in ("1", "true", "yes")
+
+
+def _apply_thesaurus(query: str) -> str:
+    """Append verified command names implied by the question (never invents one).
+
+    Measured on two independent paraphrase sets: literal hit@1/@5 unchanged
+    (0.625 / 0.6562), paraphrase hit@1 0.00 -> 0.25, hit@5 0.0625 -> 0.3125.
+    Any failure degrades to the untouched query.
+    """
+    try:
+        from core.concept_thesaurus import suggest_commands
+
+        commands, _ = suggest_commands(query)
+    except Exception:
+        return query
+    if not commands:
+        return query
+    return f"{query} {' '.join(commands)}"
+
 
 def retrieve(query, top_k=5, source_filter=None):
+    if not source_filter and query and _thesaurus_enabled():
+        query = _apply_thesaurus(query)
     """Retrieves top_k chunks matching the query, returning a list of dictionaries with source, page, text, and score."""
     # If the query contains a Tessent command name (identifiers using underscores like
     # set_failure_mapping_options, add_clocks, create_patterns, ...), prefer the precise
@@ -372,13 +570,19 @@ def retrieve(query, top_k=5, source_filter=None):
     # excerpt instead of fragmented 1000-char chunks.
     # Require at least one underscore + a real command root to avoid grabbing plain words
     # like "set", "add", "get", "run" that appear in ordinary English queries.
-    cmd_hits = re.findall(r"\b(?:set|add|create|remove|delete|write|read|report|get|put|check|run|save|do|exit|source|define)_[a-z0-9_]+\b", query)
+    cmd_hits = re.findall(_command_token_pattern(), query)
     command_defs = []
     if cmd_hits:
         for tok in dict.fromkeys(cmd_hits):
-            command_defs.extend(retrieve_command_definition(tok, source_filter=source_filter))
+            # WP-B11: sort each command's own blocks (tshell_ref first, then page)
+            # but keep commands in query-token order — a global page sort here let
+            # an unrelated earlier-page command (add_clocks p.149) displace the
+            # command actually asked about (set_clock_options p.2502).
+            # Diagnosis: evaluation/increment_27_ranking_diagnosis.md §3.
+            command_block = retrieve_command_definition(tok, source_filter=source_filter)
+            command_block.sort(key=lambda d: (0 if "tshell_ref" in d["source"].lower() else 1, d["page"]))
+            command_defs.extend(command_block)
         if command_defs:
-            command_defs.sort(key=lambda d: (0 if "tshell_ref" in d["source"].lower() else 1, d["page"]))
             # If the user is specifically asking for syntax / usage / options, or query is short:
             q_lower = query.lower()
             syntax_terms = ["syntax", "usage", "options", "arguments", "definition", "how to use", "switches", "flags", "parameters"]

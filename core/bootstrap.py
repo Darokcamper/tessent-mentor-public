@@ -21,6 +21,8 @@ Run standalone for testing:
   python core/bootstrap.py            (uses env/.env/secrets)
   python core/bootstrap.py --check    (report status only, no download)
 """
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -142,27 +144,47 @@ DEFAULT_KB_BUNDLE_URL = "https://github.com/Darokcamper/tessent_ai/releases/down
 
 
 def _get_github_token() -> str:
-    """Fetch GitHub token for private release download. Checks KB_BUNDLE_TOKEN, GITHUB_TOKEN, GH_TOKEN."""
-    token = _get("KB_BUNDLE_TOKEN") or _get("GITHUB_TOKEN") or _get("GH_TOKEN")
-    if token:
-        return token
-    # Scan secrets for any key that looks like a github token
-    try:
-        import streamlit as st
-        secrets = st.secrets
-        if secrets:
-            for k in secrets:
-                if "GITHUB" in k.upper() or "TOKEN" in k.upper():
-                    v = str(secrets[k]).strip()
-                    if v.startswith("github_pat_") or v.startswith("ghp_"):
-                        return v
-    except Exception:
-        pass
-    return ""
+    """Return the bundle-download credential: **KB_BUNDLE_TOKEN only**.
+
+    Release decision (2026-11): the bundle-download credential and the session-log
+    sync credential (``GITHUB_TOKEN``, see ``core/session_logger.py``) are separate
+    purposes and are never interchangeable. ``GITHUB_TOKEN`` / ``GH_TOKEN`` and the
+    previous "any TOKEN-ish secret that looks like a PAT" scan are deliberately not
+    consulted here: that scan could silently promote the log-sync token into a
+    bundle-download credential.
+    """
+    return str(_get("KB_BUNDLE_TOKEN", "")).strip()
 
 
 def _log(msg: str) -> None:
     print(f"[bootstrap] {msg}", flush=True)
+
+
+def expected_bundle_sha256() -> str:
+    """Configured SHA-256 for the knowledge bundle (``KB_BUNDLE_SHA256``), lower-cased."""
+    return str(_get("KB_BUNDLE_SHA256", "")).strip().lower()
+
+
+def verify_bundle_digest(data: bytes, expected: str) -> tuple:
+    """Verify *data* against the *expected* SHA-256. Returns ``(ok, reason)``.
+
+    Fail-closed by design (release decision 2026-11): a missing, malformed or
+    mismatched digest is a failure, never a silent bypass, so an unverified
+    archive is never extracted.
+
+    The reason string is non-sensitive: it never contains the expected or the
+    computed digest. The comparison is constant-time so the check cannot be used
+    to probe the expected value.
+    """
+    expected = str(expected or "").strip().lower()
+    if not expected:
+        return False, "KB_BUNDLE_SHA256 is not configured"
+    if len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
+        return False, "KB_BUNDLE_SHA256 is not a valid SHA-256 hex digest"
+    actual = hashlib.sha256(data).hexdigest()
+    if not hmac.compare_digest(actual, expected):
+        return False, "bundle SHA-256 does not match KB_BUNDLE_SHA256"
+    return True, "ok"
 
 
 def missing_secrets() -> list:
@@ -188,11 +210,14 @@ def missing_secrets() -> list:
     if not has_gemini:
         missing.append(("GEMINI_API_KEY_1", "Gemini API key (get free at https://aistudio.google.com/app/apikey)"))
 
-    # Check knowledge base token only if KB is not yet restored
+    # Check the bundle-download credential only if KB is not yet restored
     if not restore_done():
         has_token = bool(_get_github_token())
         if not has_token:
-            missing.append(("GITHUB_TOKEN", "GitHub PAT token with read access to private repo to download knowledge bundle"))
+            missing.append((
+                "KB_BUNDLE_TOKEN",
+                "GitHub PAT (read-only, private repo) used to download the knowledge bundle",
+            ))
 
     return missing
 
@@ -308,11 +333,16 @@ def restore_knowledge() -> bool:
     kb_url = _get("KB_BUNDLE_URL") or DEFAULT_KB_BUNDLE_URL
     token = _get_github_token()
     if not token:
-        _log("no GitHub token found (checked KB_BUNDLE_TOKEN, GITHUB_TOKEN, GH_TOKEN) - cannot download private knowledge base")
+        _log("KB_BUNDLE_TOKEN is not configured - cannot download the private knowledge base")
+        _log("(GITHUB_TOKEN is the session-log sync credential and is never used for downloads)")
         return False
 
     _log(f"downloading bundle: {kb_url}")
-    _log(f"token type: {'fine-grained' if token.startswith('github_pat_') else 'classic'} (len={len(token)})")
+    _log("bundle download credential: KB_BUNDLE_TOKEN")
+    if not expected_bundle_sha256():
+        _log("WARNING: KB_BUNDLE_SHA256 is not configured - the downloaded bundle will be")
+        _log("         rejected before extraction; set it to the digest printed by")
+        _log("         tools/pack_knowledge.py")
 
     # Inter-process guard: prevent the bundle from being downloaded/extracted
     # multiple times when Streamlit Cloud boots several worker processes.
@@ -399,7 +429,15 @@ def _do_restore(kb_url: str, token: str) -> bool:
         _log("app will boot WITHOUT the private knowledge base (RAG/Exam Bank degraded)")
         return False
 
-    _log(f"downloaded {len(data) / 1e6:.1f} MB - extracting to {KB_DIR}")
+    _log(f"downloaded {len(data) / 1e6:.1f} MB")
+    ok, reason = verify_bundle_digest(data, expected_bundle_sha256())
+    if not ok:
+        # Fail closed: an unverified archive is never extracted, so no partial
+        # knowledge tree can be left behind by a corrupted or substituted bundle.
+        _log(f"bundle integrity check FAILED: {reason} - refusing to extract")
+        _log("app will boot WITHOUT the private knowledge base (RAG/Exam Bank degraded)")
+        return False
+    _log("bundle SHA-256 verified - extracting to knowledge/")
     try:
         _extract_bundle(data)
     except Exception as exc:

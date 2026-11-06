@@ -43,5 +43,5 @@ A concise, high-scoring 2-3 paragraph model answer demonstrating the exact depth
 One punchy sentence highlighting the golden rule or core principle to remember for this topic.
 """
 
-    response = llm.invoke(prompt)
+    response = llm.invoke(prompt, capability="question_generation")
     return response.content.strip()

@@ -47,7 +47,7 @@ Your output must include:
 Return the response in clean, professional markdown with clear headings, bold text, and bullet points.
 """
     try:
-        response = llm.invoke(prompt)
+        response = llm.invoke(prompt, capability="batch_report")
         return response.content
     except Exception as e:
         return f"Error generating study plan: {e}"

@@ -51,5 +51,5 @@ instead of inventing facts.
 Output in clean Markdown format with clear headings.
 """
 
-    response = llm.invoke(prompt)
+    response = llm.invoke(prompt, capability="question_generation")
     return response.content.strip()

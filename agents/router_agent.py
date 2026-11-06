@@ -108,5 +108,5 @@ Question:
 
 Return ONLY the uppercase category name (e.g. EDT, SCAN, STA). Do not include any explanation or extra characters."""
 
-    response = llm.invoke(prompt)
+    response = llm.invoke(prompt, capability="routing")
     return response.content.strip().upper()

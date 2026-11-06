@@ -15,6 +15,7 @@ Key design:
 """
 
 import os
+import re
 import sys
 import threading
 from datetime import datetime
@@ -30,6 +31,86 @@ _handles = {}
 ATTACHMENT_DIR = LOG_DIR / "attachments"
 ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
 
+# ---------------------------------------------------------------------------
+# Content-sensitive logging guard (WP-10 privacy policy)
+#
+# Policy: uploaded presentation files, their file names, absolute paths, attachment
+# metadata and extracted slide text must NEVER reach the GitHub session logger or its
+# upload payload. Ordinary, non-sensitive interaction metadata keeps being logged.
+#
+# The GitHub sync uploads the WHOLE daily log file, so the only safe design is to never
+# write the sensitive data into that file. Two layers enforce it:
+#   1. ``log_qa(content_sensitive=True)`` writes a content-free marker instead of the
+#      attachment name/path/preview.
+#   2. ``_auto_sync_to_github`` refuses to upload a file whose text still matches a
+#      sensitive pattern (defence in depth for future callers).
+# ---------------------------------------------------------------------------
+
+CONTENT_SENSITIVE_REDACTION = "[redacted: content-sensitive upload]"
+
+_SENSITIVE_FIELD_KEYS = ("ATTACHMENT", "ATTACHMENT STORED AT", "ATTACHMENT PREVIEW")
+
+# Exam-bank protection (release decision 2026-11): parsed exam questions, their
+# option text and the answer material must never be written to the log, and
+# therefore never reach the GitHub upload payload or the webhook. Under the fields
+# below only a question number plus a correctness word is legitimate.
+EXAM_CONTENT_REDACTION = "[redacted: exam-bank content]"
+
+_EXAM_FIELD_KEYS = ("ANSWERS", "EXAM ANSWERS")
+_EXAM_OUTCOME_LINE = re.compile(r"^Q\d{1,3}:\s*(?:CORRECT|INCORRECT|UNSCORED)$")
+
+# Patterns that indicate identifying or content-bearing data leaked into the log.
+_LEAK_PATTERNS = (
+    ("absolute_windows_path", re.compile(r"[A-Za-z]:[\\/][^\s\"'<>|]+")),
+    ("absolute_posix_path", re.compile(r"(?<![\w.])/(?:Users|home|mnt|var|tmp)/[^\s\"'<>|]+")),
+    ("attachment_store_path", re.compile(r"attachments[\\/][0-9]{8}_[0-9a-f]{6,}_")),
+    ("slide_file_reference", re.compile(r"[\w .\-]{1,120}\.(?:pptx|ppt|potx)(?![a-z0-9])", re.IGNORECASE)),
+)
+
+
+def find_sensitive_leaks(text: str) -> list:
+    """Return human-readable findings for identifying/content data in *text*.
+
+    A redacted block (``CONTENT_SENSITIVE_REDACTION``) produces no findings: it carries
+    no name, path or content by construction.
+    """
+    body = str(text or "")
+    if not body.strip():
+        return []
+
+    findings = []
+    for label, pattern in _LEAK_PATTERNS:
+        for match in pattern.finditer(body):
+            snippet = match.group(0)
+            # The redaction marker itself is not a leak.
+            if CONTENT_SENSITIVE_REDACTION in snippet or snippet.strip() == CONTENT_SENSITIVE_REDACTION:
+                continue
+            findings.append(f"{label}: {snippet[:120]}")
+
+    # Attachment fields must either be absent or redacted - never carry a payload.
+    # Divider lines and blanks are structural, not content.
+    current_key = None
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current_key = stripped[1:-1].strip().upper()
+            continue
+        if not stripped or re.fullmatch(r"[-=]{3,}", stripped):
+            continue
+        if current_key in _SENSITIVE_FIELD_KEYS:
+            if CONTENT_SENSITIVE_REDACTION in stripped:
+                continue
+            findings.append(f"{current_key.lower()}_payload: {stripped[:120]}")
+        # Exam-bank fields: only "Q<n>: CORRECT|INCORRECT|UNSCORED" (or an explicit
+        # redaction marker) is allowed. Anything else is exam content.
+        if current_key in _EXAM_FIELD_KEYS:
+            if EXAM_CONTENT_REDACTION in stripped or CONTENT_SENSITIVE_REDACTION in stripped:
+                continue
+            if _EXAM_OUTCOME_LINE.match(stripped):
+                continue
+            findings.append(f"{current_key.lower()}_payload: {stripped[:120]}")
+    return findings
+
 # Auto-sync configuration
 _AUTO_SYNC_ENABLED = True
 _AUTO_SYNC_REPO_URL = "https://github.com/Darokcamper/tessent_ai.git"
@@ -38,8 +119,19 @@ _AUTO_SYNC_REMOTE = "origin"
 
 
 def _get_github_token():
-    """Get GitHub token from environment or Streamlit secrets (top-level or nested)."""
-    token = os.getenv("GITHUB_TOKEN", "") or os.getenv("KB_BUNDLE_TOKEN", "")
+    """Session-log sync token: **GITHUB_TOKEN only**.
+
+    Release decision (2026-11): session-log synchronization and the private
+    knowledge-bundle download are separate purposes with separate credentials.
+    ``KB_BUNDLE_TOKEN`` authenticates bundle downloads (see ``core/bootstrap.py``)
+    and must never enable an upload here. ``GH_TOKEN`` and the previous
+    "any secret that looks like a token" scan are no longer consulted either:
+    both could pick up the bundle credential and silently start uploading logs.
+
+    Returns '' when log synchronization is not explicitly configured, which keeps
+    the sync disabled. Local logging is unaffected.
+    """
+    token = os.getenv("GITHUB_TOKEN", "").strip()
     if token:
         return token
     try:
@@ -47,28 +139,22 @@ def _get_github_token():
         secrets = st.secrets
         if secrets is None:
             return ""
+        name = "GITHUB_TOKEN"
         # 1. Direct top-level check
-        for name in ("GITHUB_TOKEN", "KB_BUNDLE_TOKEN", "GH_TOKEN"):
-            try:
-                if name in secrets and not isinstance(secrets[name], (dict, list)):
-                    return str(secrets[name]).strip()
-            except Exception:
-                pass
+        try:
+            if name in secrets and not isinstance(secrets[name], (dict, list)):
+                return str(secrets[name]).strip()
+        except Exception:
+            pass
         # 2. Check inside sub-sections (e.g. if written under [auth])
         for k in secrets:
             sub = secrets[k]
             if isinstance(sub, dict) or hasattr(sub, "items"):
-                for name in ("GITHUB_TOKEN", "KB_BUNDLE_TOKEN", "GH_TOKEN"):
-                    try:
-                        if name in sub and not isinstance(sub[name], (dict, list)):
-                            return str(sub[name]).strip()
-                    except Exception:
-                        pass
-        # 3. Dynamic scan for token string pattern
-        for k in secrets:
-            v = str(secrets[k]).strip()
-            if v.startswith("github_pat_") or v.startswith("ghp_"):
-                return v
+                try:
+                    if name in sub and not isinstance(sub[name], (dict, list)):
+                        return str(sub[name]).strip()
+                except Exception:
+                    pass
         return ""
     except Exception:
         return ""
@@ -93,6 +179,33 @@ def _auto_sync_to_github(filepath: Path):
             filename = filepath.name
             api_url = f"https://api.github.com/repos/Darokcamper/tessent_ai/contents/session_logs/{filename}"
             content_bytes = filepath.read_bytes()
+
+            # WP-10 privacy guard: never upload identifying/content data. The daily log is
+            # uploaded whole, so anything sensitive written into it would leave the machine.
+            # If a leak pattern is present the upload is skipped (local logging continues).
+            try:
+                decoded = content_bytes.decode("utf-8", errors="replace")
+            except Exception:
+                decoded = ""
+            leaks = find_sensitive_leaks(decoded)
+            if leaks:
+                print(
+                    "[session_logger] Upload blocked by the content-sensitivity guard "
+                    f"({len(leaks)} finding(s)); the local log is unchanged. "
+                    f"First finding: {leaks[0]}"
+                )
+                try:
+                    import streamlit as st
+
+                    st.warning(
+                        "⚠️ Session-log upload paused: the log contains data classified as "
+                        "content-sensitive (file names, absolute paths or extracted text). "
+                        "Local logging continues."
+                    )
+                except Exception:
+                    pass
+                return
+
             content_b64 = base64.b64encode(content_bytes).decode("utf-8")
 
             # Check if file exists on GitHub to obtain its sha for update
@@ -181,14 +294,22 @@ def _send_webhook(section: str, user: str, field_lines: list):
     threading.Thread(target=_post, daemon=True).start()
 
 
-def save_attachment(bytes_or_path: bytes, filename: str, source_folder: Path = ATTACHMENT_DIR) -> str:
+def save_attachment(bytes_or_path: bytes, filename: str, source_folder: Path = ATTACHMENT_DIR,
+                    persist: bool = True) -> str:
     """Persist an uploaded attachment into the session attachments folder.
 
     Returns the absolute path of the saved copy. The stored filename is prefixed
     with a timestamp and a random tag so different files with the same name do not
     overwrite each other, and so we can correlate them back to a log entry.
+
+    ``persist=False`` keeps a content-sensitive upload out of the session directory
+    entirely (WP-10 privacy policy): nothing is written and an empty string is
+    returned, so no name or path can be logged or uploaded later.
     """
     import shutil
+
+    if not persist:
+        return ""
 
     safe_name = Path(filename).name
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -223,8 +344,12 @@ def _divider(char: str = "=", width: int = 78) -> str:
     return char * width
 
 
-def _write_block(section: str, field_lines: list) -> None:
-    """Writes a formatted LOG ENTRY block for a given section."""
+def _write_block(section: str, field_lines: list, notify_webhook: bool = True) -> None:
+    """Writes a formatted LOG ENTRY block for a given section.
+
+    ``notify_webhook=False`` suppresses the instant-notification copy of the entry; a
+    content-sensitive interaction must not be mirrored to another destination either.
+    """
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     user = "user"
     try:
@@ -265,10 +390,11 @@ def _write_block(section: str, field_lines: list) -> None:
             pass
 
     # Optional webhook notification
-    try:
-        _send_webhook(section, user, field_lines)
-    except Exception:
-        pass
+    if notify_webhook:
+        try:
+            _send_webhook(section, user, field_lines)
+        except Exception:
+            pass
 
     # Auto-sync to GitHub after each entry
     try:
@@ -292,23 +418,51 @@ def close():
 # --------------------------------------------------------------------------
 
 def log_qa(question: str, answer: str, attachment_name: str = None,
-           attachment_path: str = None, attachment_preview: str = None) -> None:
+           attachment_path: str = None, attachment_preview: str = None,
+           content_sensitive: bool = False) -> None:
     """Logs a question + AI answer from the 'Ask Question' mode.
 
     If the question came with an attachment, include its name, stored path, and a
     short text preview so the log shows exactly what document/image was used.
+
+    ``content_sensitive=True`` implements the confirmed WP-10 privacy policy: for an
+    upload whose content must not leave the application (presentations, extracted
+    slide text), only a content-free marker is written. No file name, no path and no
+    preview ever reach the log file — and therefore never reach the GitHub upload
+    payload that mirrors that file.
     """
     fields = [
         ("QUESTION", question),
         ("AI ANSWER", answer),
     ]
-    if attachment_name:
-        fields.append(("ATTACHMENT", attachment_name))
-    if attachment_path:
-        fields.append(("ATTACHMENT STORED AT", attachment_path))
-    if attachment_preview:
-        fields.append(("ATTACHMENT PREVIEW", attachment_preview))
-    _write_block("QA / ASK QUESTION", fields)
+    if content_sensitive:
+        if attachment_name or attachment_path or attachment_preview:
+            fields.append((
+                "ATTACHMENT",
+                f"{CONTENT_SENSITIVE_REDACTION} "
+                "(presentation content is processed locally and excluded from session logging)",
+            ))
+    else:
+        if attachment_name:
+            fields.append(("ATTACHMENT", attachment_name))
+        if attachment_path:
+            fields.append(("ATTACHMENT STORED AT", attachment_path))
+        if attachment_preview:
+            fields.append(("ATTACHMENT PREVIEW", attachment_preview))
+    _write_block("QA / ASK QUESTION", fields, notify_webhook=not content_sensitive)
+
+
+def log_ppt_explainer(slide_count: int, explained_count: int, outcome: str = "ok") -> None:
+    """Content-free record of a PPT Explainer run (WP-10 privacy policy).
+
+    Deliberately records counts and outcome only: no file name, no path, no slide text
+    and no model prompt. The webhook is not notified for this section.
+    """
+    _write_block("PPT EXPLAINER", [
+        ("SLIDES", str(int(slide_count))),
+        ("EXPLAINED", str(int(explained_count))),
+        ("OUTCOME", str(outcome)),
+    ], notify_webhook=False)
 
 
 def log_qa_error(question: str, error: str) -> None:
@@ -383,14 +537,26 @@ def log_deep_study(kind: str, module: str, item: str, content: str) -> None:
 
 
 def log_exam_quiz(topic: str, score: int, total: int, pct: float, details: list = None) -> None:
-    """Logs an exam bank quiz attempt with score and details."""
+    """Logs an exam-bank quiz attempt without any exam content (release decision 2026-11).
+
+    Only the score and a per-question outcome are recorded: the question text, the
+    option text and the answer material never enter the log file, so they can never
+    reach the GitHub upload payload or the webhook. The webhook is not notified for
+    this section at all.
+
+    NOTE (found during the 2026-11 release audit): this function previously built
+    ``fields`` and returned without writing anything, so exam attempts were never
+    logged. The write call below restores the intended behaviour with the safe
+    field set.
+    """
     fields = [
         ("TOPIC", topic or "All"),
         ("SCORE", f"{score}/{total} ({pct:.1f}%)"),
     ]
     if details:
         detail_lines = []
-        for q_num, user_ans, is_correct in details:
+        for q_num, _user_ans, is_correct in details:
             status = "CORRECT" if is_correct else "INCORRECT"
-            detail_lines.append(f"Q{q_num}: {user_ans} [{status}]")
+            detail_lines.append(f"Q{q_num}: {status}")
         fields.append(("ANSWERS", "\n".join(detail_lines)))
+    _write_block("EXAM BANK QUIZ", fields, notify_webhook=False)

@@ -270,6 +270,105 @@ def search_verified_notes(query: str, source_filter: str = None):
     except Exception as e:
         return f"Error searching notes: {e}"
 
+
+# ---------------------------------------------------------------------------
+# Retrieval-failure detection (WP-1, Defect A)
+#
+# ``search_verified_notes`` returns a plain string, so callers must be able to
+# tell "no evidence was found" apart from "evidence was found and it happens to
+# discuss errors". The previous implementation tested for the substrings
+# "error" / "not found" / "no matching" / "no verified" ANYWHERE in the returned
+# text. Tessent manuals are full of error messages, so genuine evidence was
+# discarded and the model abstained even though the manual page answering the
+# question had been retrieved (e.g. set_fault_type on tshell_ref page 2690).
+# ---------------------------------------------------------------------------
+
+NO_CONTEXT_SENTINEL = "<NO MANUAL CONTEXT WAS RETRIEVED>"
+
+# Exact leading sentences produced by the failure branches of the retrieval
+# helpers above. Only these (plus an empty string) mean "no evidence".
+_RETRIEVAL_FAILURE_PREFIXES = (
+    "No matching chunks found in verified notes",
+    "Error searching notes:",
+    "Error listing sources:",
+    "No verified source documents currently indexed.",
+)
+
+
+def retrieval_failed(context) -> bool:
+    """True only when *context* is a genuine retrieval failure.
+
+    A returned manual excerpt is never a failure, even when it contains words
+    such as "error", "not found", "no matching" or "no verified" in ordinary
+    technical prose.
+    """
+    if context is None:
+        return True
+    if not isinstance(context, str):
+        return False
+    text = context.strip()
+    if not text:
+        return True
+    return text.startswith(_RETRIEVAL_FAILURE_PREFIXES)
+
+
+# ---------------------------------------------------------------------------
+# Final-answer normalisation (WP-1, Defect B)
+#
+# The previous implementation replaced ANY final answer containing a refusal
+# phrase with a one-line canned abstention, discarding substantive technical
+# content and citations the model had already produced. Abstention is now
+# decided by how much answer survives once the refusal sentences are removed.
+# ---------------------------------------------------------------------------
+
+CANNED_ABSTENTION = "I do not have this information in my verified source documents."
+
+# Phrases the grounding prompts explicitly ask the model to use when a detail is
+# not supported by the retrieved evidence.
+_ABSTENTION_PHRASES = (
+    "do not have this information",
+    "do not have the exact answer",
+    "not found in the retrieved context",
+    "do not contain enough detail",
+    "does not contain enough detail",
+    "retrieved manual context does not contain",
+)
+
+_CITATION_MARKERS = ("[source:", "source document:", "source:", "page ")
+
+# Below this many characters of surviving prose (and with no citation), the
+# answer carries no usable content and is collapsed to the canned abstention.
+_MIN_SUBSTANTIVE_CHARS = 120
+
+
+def normalize_final_answer(text: str) -> str:
+    """Return *text* unchanged unless it is effectively a bare refusal.
+
+    An answer that refuses part of the question but still explains something
+    (or cites a source) is preserved verbatim, so evidence and citations are
+    never thrown away merely because a refusal sentence appears.
+    """
+    if not isinstance(text, str):
+        return text
+    answer = text.strip()
+    if not answer:
+        return CANNED_ABSTENTION
+
+    lowered = answer.lower()
+    if not any(phrase in lowered for phrase in _ABSTENTION_PHRASES):
+        return answer
+
+    # Drop the refusal sentences and measure what is left.
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", answer)
+    kept = [s for s in sentences if s.strip() and not any(p in s.lower() for p in _ABSTENTION_PHRASES)]
+    residual = " ".join(kept).strip()
+
+    has_citation = any(marker in residual.lower() for marker in _CITATION_MARKERS)
+    if has_citation or len(residual) >= _MIN_SUBSTANTIVE_CHARS:
+        return answer
+    return CANNED_ABSTENTION
+
+
 def read_source_file_page(filename_stem: str, page_num: int):
     """Reads the literal text of a specific page from a source note file."""
     filename_stem = filename_stem.strip().strip("'\"")
@@ -409,7 +508,9 @@ def ask_expert(
     history=None,
     extra_context=None
 ):
-    # Context-Aware query rewriting to assist the agent if user is asking short follow-up questions
+    # WP-8: shared referent retention (and opt-in expansion) for the retrieval query.
+    from core.query_understanding import build_retrieval_query
+
     retrieval_query = question
     if "Question:" in question:
         match = re.search(r"Question:\s*(.*?)(?:\n\nHere is|\n\nRevision Round|\n\n|$)", question, re.DOTALL)
@@ -417,17 +518,7 @@ def ask_expert(
             retrieval_query = match.group(1).strip()
 
     if history:
-        last_user_msg = None
-        for msg in reversed(history):
-            if msg.get("role") == "user":
-                last_user_msg = msg.get("content", "")
-                break
-        if last_user_msg:
-            words = retrieval_query.strip().split()
-            is_follow_up = len(words) < 6 or any(w in retrieval_query.lower() for w in ["what about", "why", "explain", "how", "it", "that", "they", "those", "this", "first", "second", "third", "prev", "last"])
-            if is_follow_up:
-                clean_last = last_user_msg.split("\n\n(Strict Grounding")[0].strip()
-                retrieval_query = f"{retrieval_query} {clean_last}"
+        retrieval_query = build_retrieval_query(retrieval_query, history)
 
     # Build the system prompt detailing role and agent guidelines
     system_prompt = f"""You are a {role}.
@@ -528,11 +619,7 @@ Let's begin!
                 ))
                 continue
             final_part = content.split("Final Answer:", 1)[1].strip()
-            # Post-processing fallback verification
-            normalized = final_part.lower()
-            if "do not have this information" in normalized or "not found in the retrieved context" in normalized:
-                if "file://" not in final_part:
-                    return "I do not have this information in my verified source documents."
+            final_part = normalize_final_answer(final_part)
             return final_part
             
         action_match = re.search(r"Action:\s*(\w+\(.*?\))", content, re.DOTALL)

@@ -5,6 +5,19 @@ import streamlit as st
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+from core.model_routing import (
+    BudgetExceeded,
+    capability_for_agent,
+    compute_backoff,
+    is_rate_limit_error,
+    parse_retry_after,
+    record_call,
+    resolve_model,
+    response_tokens,
+    retry_hint_from_exception,
+    session_budget,
+)
+
 load_dotenv()
 
 
@@ -153,7 +166,7 @@ class RotatingGeminiLLM:
         self.key_idx = 0
         self.model_idx = 0
 
-    def get_client(self, custom_key: str = None):
+    def get_client(self, custom_key: str = None, capability: str = "answer_synthesis"):
         # Check for user-provided key (BYOK)
         if not custom_key:
             try:
@@ -185,77 +198,101 @@ class RotatingGeminiLLM:
                     "(get one at https://aistudio.google.com/app/apikey)."
                 )
 
-        model = MODELS[self.model_idx % len(MODELS)]
+        # WP-12: the model is chosen per capability (routing table), with the existing
+        # fallback chain still driven by model_idx.
+        model = resolve_model(capability, self.model_idx)
         return ChatGoogleGenerativeAI(
             model=model,
             google_api_key=key,
             temperature=0.3
         )
 
-    def invoke(self, *args, **kwargs):
+    def invoke(self, *args, capability: str = "answer_synthesis", **kwargs):
+        """Invoke the model for *capability* with budget, rotation and 429 handling."""
         retries = 0
         backoff = self.initial_backoff
-        
+        budget = session_budget()
+
         while True:
+            budget.check()
             try:
-                client = self.get_client()
+                client = self.get_client(capability=capability)
                 raw_response = client.invoke(*args, **kwargs)
+                # Read usage before normalisation: the normaliser may replace the
+                # provider object with a TextResponse that has no usage metadata.
+                tokens = response_tokens(raw_response)
                 # Normalize content to prevent "'list' object has no attribute 'strip'" crashes
                 if hasattr(raw_response, 'content'):
                     raw_response.content = _normalize_content(raw_response.content)
                 else:
                     raw_response = TextResponse(_normalize_content(raw_response))
+                budget.record(tokens or 0)
+                record_call(capability, resolve_model(capability, self.model_idx), "ok", tokens)
                 return raw_response
+            except BudgetExceeded:
+                raise
             except Exception as e:
                 if isinstance(e, ValueError) and "Guest Mode requires" in str(e):
                     raise e
-                retries += 1
-                # Rotate key and fallback model on error or rate limit
-                keys = get_gemini_keys()
-                if keys:
-                    self.key_idx = (self.key_idx + 1) % len(keys)
-                    if retries % len(keys) == 0:
-                        self.model_idx = (self.model_idx + 1) % len(MODELS)
-                else:
-                    self.model_idx = (self.model_idx + 1) % len(MODELS)
-                    
+                retries, backoff = self._rotate_for_retry(retries, backoff, e, capability)
                 if retries > self.max_retries:
                     raise e
-                    
-                msg = f"Retrying with {MODELS[self.model_idx]} in {backoff:.1f}s..."
+                msg = f"Retrying with {resolve_model(capability, self.model_idx)} in {backoff:.1f}s..."
                 print(msg)
                 try:
                     st.toast(msg, icon="🔄")
                 except Exception:
                     pass
                 time.sleep(backoff)
-                backoff *= 1.2
 
-    def stream(self, *args, **kwargs):
+    def _rotate_for_retry(self, retries: int, backoff: float, error: Exception, capability: str):
+        """Rotate the key/model, honour Retry-After, and return (retries, next_backoff)."""
+        retries += 1
+        keys = get_gemini_keys()
+        if keys:
+            self.key_idx = (self.key_idx + 1) % len(keys)
+            if retries % len(keys) == 0:
+                self.model_idx = (self.model_idx + 1) % len(MODELS)
+        else:
+            self.model_idx = (self.model_idx + 1) % len(MODELS)
+
+        # WP-R1: read the provider's hint from whatever the exception really exposes
+        # (response headers, `.details` JSON body, rendered message, or the cause chain).
+        # `getattr(error, "response", None)` alone returned None for every real SDK error.
+        retry_after = retry_hint_from_exception(error) if is_rate_limit_error(error) else None
+        next_backoff = compute_backoff(
+            retries,
+            base=self.initial_backoff,
+            factor=1.2,
+            retry_after=retry_after,
+        )
+        record_call(
+            capability,
+            resolve_model(capability, self.model_idx),
+            "rate_limited" if retry_after is not None else "error",
+            retry_after=retry_after,
+        )
+        return retries, next_backoff
+
+    def stream(self, *args, capability: str = "answer_synthesis", **kwargs):
         retries = 0
         backoff = self.initial_backoff
-        
+
         while True:
+            session_budget().check()
             try:
-                client = self.get_client()
+                client = self.get_client(capability=capability)
+                record_call(capability, resolve_model(capability, self.model_idx), "stream_open")
                 return client.stream(*args, **kwargs)
+            except BudgetExceeded:
+                raise
             except Exception as e:
                 if isinstance(e, ValueError) and "Guest Mode requires" in str(e):
                     raise e
-                retries += 1
-                keys = get_gemini_keys()
-                if keys:
-                    self.key_idx = (self.key_idx + 1) % len(keys)
-                    if retries % len(keys) == 0:
-                        self.model_idx = (self.model_idx + 1) % len(MODELS)
-                else:
-                    self.model_idx = (self.model_idx + 1) % len(MODELS)
-                    
+                retries, backoff = self._rotate_for_retry(retries, backoff, e, capability)
                 if retries > self.max_retries:
                     raise e
-                    
                 time.sleep(backoff)
-                backoff *= 1.2
 
     def invoke_vision(self, prompt: str, image_bytes: bytes, image_mime: str = "image/png"):
         """Sends a text prompt together with an image to the multimodal Gemini model.
@@ -276,24 +313,24 @@ class RotatingGeminiLLM:
         retries = 0
         backoff = self.initial_backoff
         while True:
+            session_budget().check()
             try:
-                client = self.get_client()
+                client = self.get_client(capability="vision")
                 raw_response = client.invoke(messages)
                 if hasattr(raw_response, "content"):
                     raw_response.content = _normalize_content(raw_response.content)
                 else:
                     raw_response = TextResponse(_normalize_content(raw_response))
+                tokens = response_tokens(raw_response)
+                session_budget().record(tokens or 0)
+                record_call("attachment_vision", resolve_model("vision", self.model_idx), "ok", tokens)
                 return raw_response
+            except BudgetExceeded:
+                raise
             except Exception as e:
                 if isinstance(e, ValueError) and "Guest Mode requires" in str(e):
                     raise e
-                retries += 1
-                if GEMINI_KEYS:
-                    self.key_idx = (self.key_idx + 1) % len(GEMINI_KEYS)
-                    if retries % len(GEMINI_KEYS) == 0:
-                        self.model_idx = (self.model_idx + 1) % len(MODELS)
-                else:
-                    self.model_idx = (self.model_idx + 1) % len(MODELS)
+                retries, backoff = self._rotate_for_retry(retries, backoff, e, "attachment_vision")
                 if retries > self.max_retries:
                     raise e
                 try:

@@ -4,6 +4,7 @@ Grounded in the OCR-ed video transcripts and slide text under
 knowledge/txt/atpg_video_*, plus RAG retrieval from the Tessent manuals,
 with citations.
 """
+import re
 from pathlib import Path
 
 from core.llm import llm
@@ -791,6 +792,191 @@ def lesson_slug(text, limit=40):
             out.append("_")
     slug = "".join(out).strip("_")
     return slug[:limit] or "lesson"
+
+
+# ---------------------------------------------------------------------------
+# Deep Study learning path — deterministic course/lesson position + next step
+# ---------------------------------------------------------------------------
+
+
+def _course_for_module_key(module_key):
+    """Returns the COURSES entry owning *module_key*, or None.
+
+    Matches the '{order}_{course_id}_{num}' keys built by
+    list_video_modules(); numeric legacy keys resolve to the first course,
+    mirroring _resolve_module_files().
+    """
+    m_str = str(module_key or "").strip()
+    for c in COURSES:
+        if m_str.startswith("%s_%s_" % (c["order"], c["id"])):
+            return c
+    if m_str.isdigit():
+        return COURSES[0]
+    return None
+
+
+def learning_path_position(module_key, lesson_title=None, lessons=None):
+    """Derives the learner's position on the ordered Deep Study path.
+
+    Course order comes from COURSES[].order; lesson order from
+    list_video_lessons() (or the injected *lessons* list, used by tests to
+    stay offline).  Returns a dict with keys: path (ordered course-name
+    list), course_name, course_index (1-based), course_total, lesson_index
+    (1-based, None for whole-module view), lesson_total, next_lesson
+    (None at the end or for whole-module view).  Returns None when the
+    module key is unknown or has no lessons — never fabricated titles.
+    """
+    course = _course_for_module_key(module_key)
+    if course is None:
+        return None
+    if lessons is None:
+        lessons = list_video_lessons(module_key)
+    lessons = list(lessons or [])
+    if not lessons:
+        return None
+    path = [c["name"] for c in sorted(COURSES, key=lambda c: c["order"])]
+    course_index = (
+        sum(1 for c in COURSES if c["order"] <= course["order"])
+    )
+    if lesson_title is None:
+        lesson_index = None
+        next_lesson = None
+    else:
+        try:
+            lesson_index = lessons.index(lesson_title) + 1
+        except ValueError:
+            wanted = _norm_title(lesson_title)
+            lesson_index = None
+            for i, title in enumerate(lessons, 1):
+                if _norm_title(title) == wanted:
+                    lesson_index = i
+                    lesson_title = title
+                    break
+            if lesson_index is None:
+                return None
+        if lesson_index >= len(lessons):
+            next_lesson = None
+        else:
+            next_lesson = lessons[lesson_index]
+    return {
+        "path": path,
+        "course_name": course["name"],
+        "course_index": course_index,
+        "course_total": len(COURSES),
+        "lesson_title": lesson_title,
+        "lesson_index": lesson_index,
+        "lesson_total": len(lessons),
+        "next_lesson": next_lesson,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Deep Study self-check — deterministic Rapid Viva extraction + attempt check
+# ---------------------------------------------------------------------------
+
+_RAPID_VIVA_HEADING = "rapid viva questions"
+_VIVA_ITEM_RE = re.compile(r"^\s*\*{0,2}(\d+)[\.\)]\*{0,2}\s*(.+?)\s*$")
+_VIVA_STOP_WORDS = frozenset({
+    "a", "an", "are", "as", "at", "for", "how", "in", "is", "of",
+    "the", "to", "what", "why", "does", "do", "with", "and", "or",
+})
+
+
+def _viva_keywords(text):
+    """Content keywords of a model answer (lowercased, stop words dropped).
+
+    Bracketed source-citation metadata (e.g. "[Source: tshell_ref.txt,
+    Page 166]") is stripped first so learners are graded on technical
+    content, never on reproducing citation tokens.
+    """
+    cleaned = re.sub(r"\[[^\]]*\]", " ", str(text or ""))
+    return {
+        token
+        for token in re.findall(r"[a-z0-9_]+", cleaned.lower())
+        if len(token) > 1 and token not in _VIVA_STOP_WORDS
+    }
+
+
+def extract_rapid_viva_items(report_text):
+    """Extract numbered rapid-fire Q/A pairs from a generated Deep Study report.
+
+    Parses only the "## Rapid Viva Questions" section (present in both video
+    lesson and lab reports): a numbered line — plain ("1.") or bold-wrapped
+    ("**1.**", as LAB_PROMPT emits) — starts a question and the following
+    non-numbered, non-heading lines form its model answer (citations
+    preserved verbatim).  Questions with no answer text are skipped.
+    Returns a list of {"question", "answer"} dicts, or [] when the section
+    is missing, empty, or malformed (safe abstention).
+    """
+    items = []
+    if not report_text or not str(report_text).strip():
+        return items
+    in_section = False
+    current_q = None
+    current_a = []
+    for raw_line in str(report_text).splitlines():
+        line = raw_line.strip()
+        if line.startswith("##"):
+            if in_section:
+                break
+            if _RAPID_VIVA_HEADING in line.lower():
+                in_section = True
+            continue
+        if not in_section:
+            continue
+        if not line:
+            continue
+        match = _VIVA_ITEM_RE.match(line)
+        if match:
+            if current_q and any(part.strip() for part in current_a):
+                items.append({
+                    "question": current_q,
+                    "answer": "\n".join(current_a).strip(),
+                })
+            current_q = match.group(2).strip()
+            current_a = []
+        elif current_q:
+            current_a.append(line)
+    if current_q and any(part.strip() for part in current_a):
+        items.append({
+            "question": current_q,
+            "answer": "\n".join(current_a).strip(),
+        })
+    return items
+
+
+def check_viva_attempt(attempt_text, model_answer):
+    """Grade a learner's self-check attempt against a model answer.
+
+    Keyword-overlap verdict only — never invents technical content:
+      - ("full", detail) when the attempt covers all model keywords;
+      - ("partial", detail) when it covers at least one but not all;
+      - ("none", detail) for empty attempts, empty model answers, or no
+        overlap.  The model answer itself is always returned in the detail
+        so the learner can compare.
+    """
+    model_keys = _viva_keywords(model_answer)
+    if not model_keys:
+        return "none", "No model answer is available for this question."
+    attempt_keys = _viva_keywords(attempt_text)
+    if not attempt_keys:
+        return "none", (
+            "No attempt entered yet. Model answer for comparison:\n\n"
+            + str(model_answer).strip()
+        )
+    hit = model_keys & attempt_keys
+    detail = (
+        "Model answer for comparison:\n\n" + str(model_answer).strip()
+    )
+    if hit >= model_keys:
+        return "full", "All key points covered. " + detail
+    if hit:
+        missing = sorted(model_keys - hit)
+        return "partial", (
+            "Covered: %s. Missing keywords: %s. %s"
+            % (", ".join(sorted(hit)), ", ".join(missing), detail)
+        )
+    return "none", "No key points matched yet. " + detail
 
 
 def explain_video_lesson_detail(module_num, lesson_title, top_k=12):

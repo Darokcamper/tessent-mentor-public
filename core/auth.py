@@ -244,15 +244,21 @@ def current_user() -> str:
 
 
 def owner_emails() -> list:
-    """Parse comma/space separated owner emails from APP_OWNER_EMAILS or APP_OWNER_EMAIL."""
-    raw = _get("APP_OWNER_EMAILS") or _get("APP_OWNER_EMAIL", "hazarh833@gmail.com")
+    """Owner identities from APP_OWNER_EMAILS or APP_OWNER_EMAIL (comma/space separated).
+
+    Release decision (2026-11): there is deliberately **no built-in fallback owner**.
+    Production ownership must be configured explicitly. An empty result means "no
+    owner is configured", which every fail-closed check below treats as *deny*.
+    """
+    raw = _get("APP_OWNER_EMAILS") or _get("APP_OWNER_EMAIL", "")
     tokens = re.split(r"[,;\s]+", raw)
     return [e.strip().lower() for e in tokens if "@" in e]
 
 
 def owner_email() -> str:
+    """First configured owner identity, or '' when ownership is not configured."""
     owners = owner_emails()
-    return owners[0] if owners else "hazarh833@gmail.com"
+    return owners[0] if owners else ""
 
 
 def is_owner() -> bool:
@@ -284,6 +290,63 @@ def is_guest() -> bool:
         return not is_owner()
     except Exception:
         return False
+
+
+# Identities that carry no verified person behind them. ``current_user()`` falls
+# back to these when nothing identifies the caller, so none of them may ever be
+# accepted as an owner.
+_PLACEHOLDER_IDENTITIES = {
+    "", "user", "guest", "anonymous", "unknown", "none", "google-user", "n/a",
+}
+
+
+def auth_configured() -> bool:
+    """True when a login gate is actually configured (password pool or Google OIDC)."""
+    try:
+        return bool(_passwords()) or _oidc_enabled()
+    except Exception:
+        return False
+
+
+def owner_verified() -> bool:
+    """Strict, fail-closed owner check used as the Exam Bank security boundary.
+
+    ``is_owner()`` is deliberately *not* used for authorization: it is permissive
+    for CLI runs, tests and the open-access local-dev default, so it can never
+    deny reliably. This predicate denies on every uncertainty:
+
+    * no login gate configured       -> deny (identity cannot be established)
+    * unauthenticated session        -> deny
+    * empty / placeholder identity   -> deny
+    * no APP_OWNER_EMAILS configured -> deny (there is no fallback owner)
+    * identity resolution raises     -> deny
+    """
+    try:
+        if not auth_configured():
+            return False
+        if not is_authenticated():
+            return False
+        user = (current_user() or "").strip().lower()
+        if not user or user in _PLACEHOLDER_IDENTITIES:
+            return False
+        owners = owner_emails()
+        if not owners:
+            return False
+        return user in owners
+    except Exception:
+        return False
+
+
+def require_owner(action: str = "This feature") -> bool:
+    """UI guard for owner-only surfaces; returns True only for a verified owner.
+
+    Callers must stop rendering when this returns False (``st.stop()``). The
+    message deliberately reveals nothing about the protected content.
+    """
+    if owner_verified():
+        return True
+    st.error(f"🔒 {action} is restricted to the owner account.")
+    return False
 
 
 def logout():

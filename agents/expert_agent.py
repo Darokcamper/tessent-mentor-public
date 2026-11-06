@@ -1,26 +1,26 @@
-from agents.base_agent import search_verified_notes
+from agents.base_agent import (
+    NO_CONTEXT_SENTINEL,
+    retrieval_failed,
+    search_verified_notes,
+)
 from agents.attachment_context import get_attachment_context
 from core.llm import llm
 
 def build_expert_prompt(question, persona_title, expertise_area, history=None, extra_context=None):
-    # Context-aware query rewriting for follow-ups (prevents losing context on queries like 'why?' or 'what about 3 and 4')
-    retrieval_query = question.strip()
-    followup_words = ["it", "this", "that", "they", "these", "those", "why", "how", "what about", "what if", "explain", "elaborate", "tell me more"]
-    q_lower = question.lower()
-    q_words = q_lower.split()
+    # WP-8: context retention for follow-ups lives in one tested helper; vocabulary
+    # expansion is opt-in because it measured neutral (see core/query_understanding).
+    from core.query_understanding import build_retrieval_query
 
-    if history and (len(q_words) <= 6 or any(w in q_words for w in followup_words)):
-        for msg in reversed(history):
-            if msg.get("role") == "user":
-                prev_text = msg.get("content", "").split("\n\n[📎 Attached:")[0].strip()
-                if prev_text:
-                    retrieval_query = f"{prev_text} {question}"
-                break
+    retrieval_query = build_retrieval_query(question, history)
 
     # Retrieve relevant manual context
     context = search_verified_notes(retrieval_query)
-    if not context or not context.strip() or any(t in context.lower() for t in ["no verified", "no matching", "not found", "error"]):
-        context = "<NO MANUAL CONTEXT WAS RETRIEVED>"
+    if retrieval_failed(context):
+        # WP-1: only a genuine retrieval failure becomes the sentinel. The old
+        # check matched the words "error"/"not found"/"no matching" anywhere in
+        # the manual text, so perfectly good evidence was discarded whenever the
+        # manual happened to discuss an error message.
+        context = NO_CONTEXT_SENTINEL
 
     attachment_block = ""
     if not extra_context:

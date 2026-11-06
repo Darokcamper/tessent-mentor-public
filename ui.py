@@ -1,5 +1,7 @@
 import os
 import re
+import json
+import uuid
 from pathlib import Path
 import streamlit as st
 
@@ -30,13 +32,33 @@ from agents.deep_study_agent import (
     explain_video_lesson, explain_lab_exercise, explain_video_lesson_detail_v2,
     explain_lab_exercise_v2, list_lab_files_at_once,
     generate_lab_ppt_from_report, generate_lesson_ppt_from_report,
+    extract_rapid_viva_items, check_viva_attempt, learning_path_position,
 )
-from agents.crossref_agent import crossref_lab, where_used, format_crossref_table
-from agents.exam_bank_agent import load_questions, get_questions_by_topic, get_topics, format_question, format_quiz, evaluate_answer as evaluate_exam_answer
+from agents.crossref_agent import (crossref_lab, where_used, format_crossref_table,
+                                   related_labs_for_display, module_for_lab_display)
+from agents.exam_bank_agent import (
+    evaluate_answer as evaluate_exam_answer,
+    default_include_unverified as default_exam_include_unverified,
+    get_corpus_status as get_exam_corpus_status,
+    get_filter_options as get_exam_filter_options,
+    get_review_topics as get_exam_review_topics,
+    load_questions as load_exam_questions,
+    select_questions as select_exam_questions,
+    search_questions as search_exam_questions,
+    coverage_report as exam_coverage_report,
+    export_questions_markdown as export_exam_markdown,
+)
 from core.rag_builder import upload_and_index_pdf, index_text_file
+from core.command_search import search_commands, get_available_filter_options
+from core.command_indexer import load_command_index
 from agents.attachment_agent import ask_with_text_attachment, ask_with_image
 from core.file_reader import document_text_to_string, is_text_ext, is_image_ext
-from core.auth import require_auth, auth_badge_sidebar, is_owner, owner_email
+from core.auth import (
+    require_auth, auth_badge_sidebar, is_owner, owner_email,
+    owner_verified, require_owner,
+)
+from core.batch_exporter import BatchExporter, ExportMode
+from core.usage_panel import render_usage_panel
 try:
     from core.llm import get_gemini_keys as _get_gemini_keys
 except ImportError:
@@ -56,6 +78,8 @@ try:
         log_viva_question, log_viva_answer_and_evaluation,
         log_study_plan, log_deep_study, log_exam_quiz,
     )
+    from core.chat_transcript import format_chat_transcript
+    from core.chat_state import drop_last_answer, truncate_for_edit
 except ImportError:
     try:
         import sys, importlib
@@ -68,6 +92,8 @@ except ImportError:
             log_viva_question, log_viva_answer_and_evaluation,
             log_study_plan, log_deep_study, log_exam_quiz,
         )
+        from core.chat_transcript import format_chat_transcript
+        from core.chat_state import drop_last_answer, truncate_for_edit
     except Exception:
         from core.session_logger import (
             log_qa, log_qa_error, save_attachment,
@@ -76,6 +102,8 @@ except ImportError:
             log_viva_question, log_viva_answer_and_evaluation,
             log_study_plan,
         )
+        from core.chat_transcript import format_chat_transcript
+        from core.chat_state import drop_last_answer, truncate_for_edit
         def log_deep_study(*args, **kwargs): pass
         def log_exam_quiz(*args, **kwargs): pass
 
@@ -150,23 +178,49 @@ def extract_score(eval_text):
 # =====================================
 with st.sidebar:
     auth_badge_sidebar()
+    # ── Privacy disclosure (release decision 2026-11-06) ────────────────────
+    # Session activity is recorded and uploaded to the owner's private repository,
+    # so users must be told. Rendered after require_auth(), i.e. only for signed-in
+    # users, and it states what is deliberately NOT stored.
+    st.caption(
+        "ℹ️ **Privacy:** your questions, answers and generated explanations are "
+        "recorded and stored in the site owner's private repository for review. "
+        "Uploaded presentation content, file names and exam-bank material are never logged."
+    )
     st.title("🧠 Tessent Mentor AI")
     st.caption("Tessent & DFT Expert Assistant")
     
+    # Navigation entries are filtered per identity. The Exam Bank is owner-only
+    # (release decision 2026-11): non-owners never see the entry, and — because
+    # hiding a widget is not a security boundary — the page branch itself
+    # re-authorizes server-side before any Exam Bank data is read.
+    _nav_pages = [
+        "📤 Upload Manuals & Labs",
+        "📖 Ask Question & Manual Citation",
+        "🧪 Lab & Command Explainer",
+        "🔍 Commands Explorer (Siemens DFT)",
+        "❓ Assessment Question Generator",
+        "🎤 Interactive Viva Practice",
+        "📚 DFT Study Planner",
+        "🔬 Deep Study (Videos & Labs)",
+        "📝 Exam Question Bank (Real Questions)",
+        "📦 Batch Export (All Reports)",
+        "🧾 PPT Explainer",
+    ]
+    if not owner_verified():
+        _nav_pages.remove("📝 Exam Question Bank (Real Questions)")
+
     mode = st.radio(
         "Navigation Mode",
-        [
-            "📤 Upload Manuals & Labs",
-            "📖 Ask Question & Manual Citation",
-            "🧪 Lab & Command Explainer",
-            "❓ Assessment Question Generator",
-            "🎤 Interactive Viva Practice",
-            "📚 DFT Study Planner",
-            "🔬 Deep Study (Videos & Labs)",
-            "📝 Exam Question Bank (Real Questions)",
-            "📦 Batch Export (All Reports)",
-        ]
+        _nav_pages,
     )
+
+    # ── WP-B: session usage & model routing (capability, calls, tokens, retries) ──
+    # Opaque per-session key for the in-process budget counters. It is never derived
+    # from user data, never logged, and never persisted.
+    if "_vm_session_id" not in st.session_state:
+        st.session_state["_vm_session_id"] = uuid.uuid4().hex[:12]
+    render_usage_panel(st, st.session_state["_vm_session_id"])
 
     # Helper to enforce Strict Guest Mode (BYOK) across the app
     def ensure_llm_access() -> bool:
@@ -276,7 +330,21 @@ with st.sidebar:
         
         if st.button("🗑 Clear Chat", use_container_width=True):
             st.session_state.messages = []
+            st.session_state.pop("show_export", None)
             st.rerun()
+
+        if st.button("💾 Export Chat", use_container_width=True):
+            st.session_state["show_export"] = True
+
+        if st.session_state.get("show_export") and st.session_state.messages:
+            transcript_md = format_chat_transcript(st.session_state.messages)
+            st.download_button(
+                label="⬇️ Download Conversation (.md)",
+                data=transcript_md,
+                file_name="tessent_mentor_conversation.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
             
     elif mode == "🎤 Interactive Viva Practice":
         if st.button("🗑 Clear Viva Session", use_container_width=True):
@@ -348,10 +416,54 @@ elif mode == "📖 Ask Question & Manual Citation":
     st.title("📖 Tessent Reference Manual Assistant")
     st.caption("Ask questions grounded strictly in official Tessent reference manuals with exact page & section citations.")
 
-    # Display Old Chat
-    for msg in st.session_state.messages:
+    # Display Old Chat (WP-9: per-message copy, edit and regenerate)
+    _messages = st.session_state.messages
+    _last_assistant_index = max(
+        (i for i, m in enumerate(_messages) if m.get("role") == "assistant"), default=None
+    )
+    for _idx, msg in enumerate(_messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+            if msg.get("role") == "assistant":
+                # One-action copy: st.code renders Streamlit's own copy button, so no
+                # custom frontend or dependency is needed and the rendered Markdown is
+                # unchanged.
+                with st.expander("📋 Copy answer", expanded=False):
+                    st.code(msg["content"], language=None)
+                if _idx == _last_assistant_index:
+                    if st.button("🔄 Regenerate this answer", key=f"regen_{_idx}"):
+                        _remaining, _question_for_retry = drop_last_answer(_messages)
+                        st.session_state.messages = _remaining
+                        st.session_state["pending_question"] = _question_for_retry
+                        st.rerun()
+            elif msg.get("role") == "user":
+                if st.button("✏️ Edit this question", key=f"edit_{_idx}"):
+                    st.session_state["edit_index"] = _idx
+                    st.session_state["edit_text"] = msg["content"]
+                    st.rerun()
+
+    if st.session_state.get("edit_index") is not None:
+        _edit_idx = st.session_state["edit_index"]
+        with st.form(key="edit_question_form", clear_on_submit=False):
+            _edited = st.text_area(
+                "Edit your question and resubmit (this replaces it and everything after it):",
+                value=st.session_state.get("edit_text", ""),
+                height=140,
+                key="edit_question_area",
+            )
+            _col_save, _col_cancel = st.columns(2)
+            _save = _col_save.form_submit_button("✅ Resubmit", use_container_width=True)
+            _cancel = _col_cancel.form_submit_button("✖ Cancel", use_container_width=True)
+        if _cancel:
+            st.session_state.pop("edit_index", None)
+            st.session_state.pop("edit_text", None)
+            st.rerun()
+        if _save and _edited.strip():
+            st.session_state.messages = truncate_for_edit(st.session_state.messages, _edit_idx)
+            st.session_state.pop("edit_index", None)
+            st.session_state.pop("edit_text", None)
+            st.session_state["pending_question"] = _edited.strip()
+            st.rerun()
 
     # Optional attachment (document or image) to go with the question
     st.markdown("---")
@@ -375,8 +487,12 @@ elif mode == "📖 Ask Question & Manual Citation":
             st.caption(f"📄 Attached document: `{fnote}` — will be read and used with your question.")
     st.markdown("---")
 
-    # Chat Input
+    # Chat Input (WP-9: a pending question from Edit / Regenerate takes precedence so
+    # the retried turn runs through exactly the same pipeline as a typed question)
     question = st.chat_input("Ask a Tessent Scan, ATPG, EDT, or TShell question...")
+    _pending_question = st.session_state.pop("pending_question", None)
+    if _pending_question:
+        question = _pending_question
 
     if question:
         if not ensure_llm_access():
@@ -462,6 +578,30 @@ elif mode == "📖 Ask Question & Manual Citation":
                             answer = agent(question, history[:-1])
                             st.markdown(answer)
                     st.session_state.messages.append({"role": "assistant", "content": answer})
+                    # WP-1 fallback: when the answer abstained and no concept matched, offer
+                    # clearly-labelled suggestions so the user has a way forward. The abstention
+                    # text above stays authoritative; nothing here is presented as an answer.
+                    try:
+                        _abstained = any(
+                            marker in (answer or "").lower()
+                            for marker in ("do not have the exact answer", "do not have this information",
+                                           "does not contain enough detail", "not in my verified source")
+                        )
+                        if _abstained:
+                            from core.concept_thesaurus import suggest_commands as _suggest_concepts
+                            from core.retrieval_fallback import (
+                                render_suggestions_markdown as _render_suggestions,
+                                suggest_commands_for_question as _suggest_commands,
+                            )
+
+                            _concept_cmds, _ = _suggest_concepts(question)
+                            _suggestions = _suggest_commands(question, concept_commands=_concept_cmds)
+                            _block = _render_suggestions(_suggestions)
+                            if _block:
+                                with st.expander("🔎 Suggestions to refine your question", expanded=False):
+                                    st.markdown(_block)
+                    except Exception:
+                        pass
                     if log_att_name:
                         st.caption(
                             f"📎 Answer used attachment `{log_att_name}` — saved copy: `{log_att_path}`"
@@ -525,9 +665,240 @@ elif mode == "🧪 Lab & Command Explainer":
         else:
             st.error("Please enter a command or script sequence.")
 
+    # WP-2: the cross-reference used to live only in Deep Study → Lab tab, so users working
+    # in this lab-oriented mode saw no cross-reference at all (and concluded it "only works
+    # for ATPG Core"). It is now reachable here, over every course group.
+    with st.expander("🔗 Lab ↔ Manual Cross-Reference (all modules)", expanded=False):
+        st.caption(
+            "Deterministic command extraction per lab exercise — every Tessent command found in "
+            "the lab material is matched to its manual definition with page citations. Same "
+            "engine as Deep Study; no LLM, no hallucination."
+        )
+        _xr_all_labs = list_lab_exercises()
+        _xr_pick = st.selectbox("Cross-reference which lab?", _xr_all_labs, key="labxr_pick")
+        _xr_mod = module_for_lab_display(_xr_pick)
+        st.caption(f"Resolved course group: **{_xr_mod}**")
+        _xr_key = "labxr_rows_" + _xr_mod + "_" + _xr_pick
+        if st.button("🔍 Build Cross-Reference", key="labxr_btn", use_container_width=True):
+            with st.spinner("Extracting commands and matching manual definitions..."):
+                try:
+                    st.session_state[_xr_key] = crossref_lab(_xr_pick, module=_xr_mod)
+                except Exception as exc:
+                    st.session_state[_xr_key] = "ERROR: " + str(exc)
+
+        _xr_rows = st.session_state.get(_xr_key)
+        if isinstance(_xr_rows, str):
+            st.error(_xr_rows)
+        elif _xr_rows is not None:
+            if _xr_rows:
+                st.markdown(format_crossref_table(_xr_rows, lab_display=_xr_pick))
+            else:
+                st.info(
+                    "No exercise-level command evidence was found for this lab. "
+                    "This lab is one of the known gaps (the workbook section is absent, the "
+                    "scope text contains no command, or no scope text exists at all) — no "
+                    "mapping is invented to fill it."
+                )
+
 # =====================================
-# 3. PRACTICE QUESTION GENERATOR MODE
+# 2B. COMMANDS EXPLORER MODE (STAGE 2.3)
 # =====================================
+elif mode == "🔍 Commands Explorer (Siemens DFT)":
+    st.title("🔍 Commands Explorer (Siemens DFT)")
+    st.caption("Deterministic, corpus-grounded index of verified Siemens Tessent Shell commands, syntax, options, and workbook references.")
+
+    filter_opts = get_available_filter_options()
+
+    # WP-3: genuine type-ahead. Streamlit 1.58.0 filters the option list live as the
+    # user types (filter_mode="prefix"), and accept_new_options lets the same widget
+    # submit free text, so wildcard/substring/alias queries still go through the
+    # deterministic search_commands() engine below.
+    _index_for_options = load_command_index()
+    _command_names = set(_index_for_options.get("commands", {}))
+    _alias_names = set(_index_for_options.get("alias_map", {}))
+    _query_options = sorted(_command_names | _alias_names)
+
+    col_q, col_m, col_mode, col_flow = st.columns([3, 1, 1, 2])
+    with col_q:
+        picked_query = st.selectbox(
+            "Search Command / Alias / Keyword",
+            options=_query_options,
+            index=None,
+            filter_mode="prefix",
+            accept_new_options=True,
+            placeholder="e.g. write (type-ahead) · write* · scan · read_cell_lib",
+            help=(
+                "Type-ahead prefix filtering over every indexed command. Press Enter on "
+                "free text to run the deterministic search: 'write*' for prefix-only "
+                "matching, 'scan' for a substring, or an alias such as read_cell_lib."
+            ),
+            key="cmd_explorer_query",
+        )
+    search_query = (picked_query or "").strip()
+    with col_m:
+        sel_module = st.selectbox("Module", ["ALL"] + filter_opts["modules"])
+    with col_mode:
+        sel_mode = st.selectbox("Mode", ["ALL"] + filter_opts["modes"])
+    with col_flow:
+        sel_flow = st.selectbox("Flow Step", ["ALL"] + filter_opts["flow_steps"])
+
+    inc_unverified = st.checkbox("Include unverified allowlist candidates (6 legacy)", value=False)
+
+    results = search_commands(
+        query=search_query,
+        module=sel_module,
+        mode=sel_mode,
+        flow_step=sel_flow,
+        include_unverified=inc_unverified,
+    )
+
+    st.caption(f"Showing **{len(results)}** command(s)")
+
+    # WP-3: explain every match in one pass. Deterministic and source-grounded (index fields
+    # only), so a wildcard like write* can be answered without inventing definitions.
+    if len(results) > 1:
+        _bulk_col1, _bulk_col2 = st.columns([2, 1])
+        with _bulk_col1:
+            _bulk_clicked = st.button(
+                f"📖 Explain all {len(results)} matching commands",
+                key="cmd_bulk_explain_btn",
+                help="Renders purpose, syntax, arguments, examples and the manual citation for "
+                     "every match, straight from the verified command index.",
+            )
+        with _bulk_col2:
+            _bulk_limit = st.number_input("Max commands", min_value=1, max_value=60, value=min(32, len(results)),
+                                          key="cmd_bulk_limit")
+        if _bulk_clicked:
+            try:
+                from core.command_bulk_explain import bulk_explain, render_bulk_markdown
+
+                _bulk = bulk_explain(search_query or "", limit=int(_bulk_limit))
+                _md = render_bulk_markdown(_bulk)
+                st.session_state["cmd_bulk_markdown"] = _md
+                st.session_state["cmd_bulk_summary"] = (
+                    _bulk["matched"], _bulk["explained"], len(_bulk["undocumented"]))
+            except Exception as _bulk_error:
+                st.error(f"Bulk explanation failed: {type(_bulk_error).__name__}")
+        if st.session_state.get("cmd_bulk_markdown"):
+            _matched, _explained, _undocumented = st.session_state.get(
+                "cmd_bulk_summary", (0, 0, 0))
+            st.caption(f"Bulk explanation: **{_explained}** of **{_matched}** rendered · "
+                       f"{_undocumented} with incomplete documentation (labelled in the output).")
+            with st.expander("📄 Bulk explanation", expanded=True):
+                st.markdown(st.session_state["cmd_bulk_markdown"])
+                st.download_button(
+                    "⬇️ Download bulk explanation (.md)",
+                    data=st.session_state["cmd_bulk_markdown"],
+                    file_name=f"bulk_explain_{(search_query or 'all').replace('*', 'star')}.md",
+                    mime="text/markdown",
+                    key="cmd_bulk_download",
+                )
+
+    if not results:
+        st.info("ℹ️ No commands match your search query and filters.")
+    else:
+        col_list, col_detail = st.columns([1, 2])
+        with col_list:
+            cmd_labels = []
+            for r in results:
+                status_icon = "✅" if r.get("status") == "VERIFIED_CANONICAL" else "⚠️"
+                alias_tag = f" [alias: {r['matched_alias']}]" if r.get("matched_alias") else ""
+                cmd_labels.append(f"{status_icon} {r.get('canonical_name', r.get('command'))}{alias_tag}")
+
+            selected_idx = st.selectbox(
+                "Select Command to Inspect",
+                range(len(results)),
+                format_func=lambda i: cmd_labels[i],
+                key="cmd_explorer_select",
+            )
+            selected = results[selected_idx]
+
+        with col_detail:
+            cname = selected.get("canonical_name", selected.get("command"))
+            st.subheader(f"`{cname}`")
+
+            if selected.get("status") == "UNVERIFIED_IN_CORPUS":
+                st.warning("⚠️ **UNVERIFIED IN CORPUS** — Legacy allowlist candidate with zero definitions in Siemens manuals and zero occurrences in audited workbooks.")
+                if selected.get("note"):
+                    st.markdown(f"**Note:** {selected['note']}")
+            else:
+                col_b1, col_b2, col_b3, col_b4 = st.columns(4)
+                with col_b1:
+                    st.metric("Module", selected.get("module") or "N/A")
+                with col_b2:
+                    st.metric("Mode", selected.get("mode") or "N/A")
+                with col_b3:
+                    st.metric("Context", selected.get("context") or "N/A")
+                with col_b4:
+                    st.metric("Difficulty", selected.get("difficulty", "N/A").capitalize() if selected.get("difficulty") else "N/A")
+
+                if selected.get("flow_step"):
+                    st.markdown(f"🎯 **Flow Step (curated):** `{selected['flow_step']}`")
+                    st.caption(
+                        "Curated taxonomy label — a human classification of where this command "
+                        "sits in the flow. The cited page supports the command; it does not "
+                        "necessarily state this flow position verbatim "
+                        "(see FLOW_STEP_AUDIT_REPORT.md)."
+                    )
+                else:
+                    st.caption(
+                        "🎯 **Flow Step:** not recorded in the available sources for this command."
+                    )
+
+                if selected.get("module_inferred"):
+                    st.caption(
+                        "🧭 Module inferred from the manual's own `Context:` line: "
+                        f"`{selected.get('module_evidence') or 'no context recorded'}`"
+                    )
+
+                if selected.get("matched_alias"):
+                    rel = selected.get("alias_metadata", {}).get("relationship", "alias")
+                    st.info(f"🔗 Match resolved from alias **`{selected['matched_alias']}`** (Relationship: `{rel}`)")
+
+                if selected.get("aliases"):
+                    alias_badges = ", ".join(f"`{a}`" for a in selected["aliases"])
+                    st.caption(f"Known Aliases: {alias_badges}")
+
+                st.markdown(f"**Purpose:** {selected.get('purpose') or 'Not stated in the available manual entry.'}")
+
+                arguments = selected.get("arguments") or []
+                if arguments:
+                    shown = ", ".join(f"`{arg}`" for arg in arguments[:40])
+                    if len(arguments) > 40:
+                        shown += f" … (+{len(arguments) - 40} more)"
+                    st.markdown(f"**Arguments / Options:** {shown}")
+                    if selected.get("arguments_note"):
+                        st.caption(selected["arguments_note"])
+                else:
+                    st.markdown(
+                        "**Arguments / Options:** "
+                        + (
+                            "the manual entry does not list arguments or options."
+                            if selected.get("arguments_unavailable")
+                            else "none captured for this command."
+                        )
+                    )
+
+                st.markdown("**Authoritative Syntax:**")
+                st.code(selected.get("syntax") or f"{cname}  # syntax not recorded in the available sources", language="tcl")
+
+                if selected.get("examples"):
+                    with st.expander("📝 Examples from the manual", expanded=False):
+                        st.code(selected["examples"], language="tcl")
+                else:
+                    st.caption("📝 No example is recorded for this command in the available sources.")
+
+                evidence = selected.get("source_evidence")
+                if evidence:
+                    st.markdown(
+                        f"📖 **Authoritative Citation:** `{evidence.get('file')}`, **Page {evidence.get('page')}** ({evidence.get('section', 'Command Reference')})"
+                    )
+
+                wbs = selected.get("workbook_references", [])
+                if wbs:
+                    with st.expander(f"📚 Audited Workbook Occurrences ({len(wbs)})", expanded=False):
+                        for ref in wbs:
+                            st.markdown(f"- **{ref.get('module')}**: `{ref.get('item_id')}` ({ref.get('source_reference')})")
 elif mode == "❓ Assessment Question Generator":
     st.title("❓ DFT Practice & Viva Question Generator")
     st.caption("Generate a targeted question bank for any core DFT/Tessent module, with benchmark model answers and manual citations.")
@@ -678,6 +1049,62 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
 
             lesson_titles = list_video_lessons(sel_num)
             lesson_options = ["Whole module (all lessons)"] + lesson_titles
+
+            # Learning-path strip: ordered course sequence + position.
+            # The Next button uses an on_click callback (set before the
+            # selectbox is instantiated below) — never mutates ds_lesson_sel
+            # after widget creation in the same run.
+            def _ds_advance_lesson():
+                target = st.session_state.get("ds_path_next_target")
+                if target is not None:
+                    st.session_state["ds_lesson_sel"] = target
+
+            path_pos = learning_path_position(sel_num, lessons=lesson_titles)
+            if path_pos is None:
+                st.caption(
+                    "Learning path unavailable for this module — "
+                    "no lesson data was found."
+                )
+            else:
+                crumbs = []
+                for i, cname in enumerate(path_pos["path"], 1):
+                    if cname == path_pos["course_name"]:
+                        crumbs.append("**[%s]**" % cname)
+                    else:
+                        crumbs.append("%d. %s" % (i, cname))
+                st.caption("🗺️ Learning path: " + " → ".join(crumbs))
+                cur_title = st.session_state.get("ds_lesson_sel")
+                if cur_title and cur_title != "Whole module (all lessons)":
+                    cur_pos = learning_path_position(
+                        sel_num, cur_title, lessons=lesson_titles
+                    )
+                    if cur_pos is not None and cur_pos["lesson_index"] is not None:
+                        st.caption(
+                            "Lesson %d of %d in %s (Course %d of %d)"
+                            % (
+                                cur_pos["lesson_index"],
+                                cur_pos["lesson_total"],
+                                cur_pos["course_name"],
+                                cur_pos["course_index"],
+                                cur_pos["course_total"],
+                            )
+                        )
+                        if cur_pos["next_lesson"] is not None:
+                            st.session_state["ds_path_next_target"] = cur_pos[
+                                "next_lesson"
+                            ]
+                            st.button(
+                                "Next lesson: %s" % cur_pos["next_lesson"],
+                                key="ds_path_next_btn",
+                                on_click=_ds_advance_lesson,
+                                use_container_width=True,
+                            )
+                        else:
+                            st.caption(
+                                "You are on the last lesson of this module — "
+                                "end of the available path."
+                            )
+
             sel_lesson = st.selectbox(
                 "Choose an individual video lesson:",
                 lesson_options,
@@ -775,13 +1202,120 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
                         mime="text/markdown",
                         key="ds_lesson_dl_" + slug,
                     )
+                    # Rapid Viva self-check: interactive per-lesson assessment
+                    # parsed deterministically from the report's own section.
+                    viva_items = extract_rapid_viva_items(cached_lesson)
+                    if viva_items:
+                        with st.expander(
+                            "📝 Rapid Viva Self-Check (%d questions)" % len(viva_items),
+                            expanded=False,
+                        ):
+                            st.caption(
+                                "Type your answer per question and check it against "
+                                "the report's model answer. Nothing is sent anywhere; "
+                                "checking is local keyword overlap."
+                            )
+                            n_show = min(len(viva_items), 10)
+                            for idx in range(n_show):
+                                item = viva_items[idx]
+                                st.markdown("**Q%d. %s**" % (idx + 1, item["question"]))
+                                attempt_key = (
+                                    "ds_viva_attempt_" + str(sel_num) + "_" + slug
+                                    + "_" + str(idx)
+                                )
+                                attempt = st.text_area(
+                                    "Your answer:",
+                                    key=attempt_key,
+                                    height=68,
+                                )
+                                if st.button(
+                                    "Check answer",
+                                    key="ds_viva_check_" + str(sel_num) + "_" + slug
+                                    + "_" + str(idx),
+                                ):
+                                    verdict, detail = check_viva_attempt(
+                                        attempt, item["answer"]
+                                    )
+                                    if verdict == "full":
+                                        st.success("✅ Full credit. " + detail)
+                                    elif verdict == "partial":
+                                        st.warning("🟡 Partial credit. " + detail)
+                                    else:
+                                        st.info("⬜ No credit yet. " + detail)
+                                with st.expander("Model answer", expanded=False):
+                                    st.markdown(item["answer"])
+                    else:
+                        st.caption(
+                            "Rapid Viva Self-Check unavailable for this report — "
+                            "no answerable rapid-fire section was found."
+                        )
 
     with lab_tab:
         lab_list = list_lab_exercises()
         if not lab_list:
             st.warning("No lab exercises found in the knowledge base.")
         else:
+            # WP-5: name the coverage gap per course instead of leaving the list looking
+            # incomplete. Counts come from the same list this tab offers.
+            try:
+                from collections import Counter as _Counter
+
+                _lab_counts = _Counter()
+                for _lab in lab_list:
+                    _lab_counts[module_for_lab_display(_lab)] += 1
+                _counts_text = ", ".join(f"{course}: {count}"
+                                         for course, count in sorted(_lab_counts.items()))
+                st.caption(f"Lab exercises available — {_counts_text} ({len(lab_list)} total).")
+                if "TSHELL" in str(_lab_counts.keys()):
+                    _shell_labs = _lab_counts.get("TSHELL_LINUX", 0)
+                    if _shell_labs:
+                        st.caption(
+                            f"Tessent Shell has {_shell_labs} lab exercises; the separate "
+                            "\"Tessent Shell\" theory group in Batch Export has no lab source in "
+                            "the corpus, so no Shell lab is invented to fill it."
+                        )
+            except Exception:
+                pass
             sel_lab = st.selectbox("Choose a lab exercise:", lab_list, key="ds_lab_sel")
+            # Related labs (suggested prerequisites): deterministic ranking by
+            # shared verified commands (crossref_agent). Lazy — only computed on
+            # click so no corpus scan happens during normal browsing.
+            rel_key = "ds_lab_related_" + sel_lab.replace(" / ", "_")
+            if st.button(
+                "Show related labs (suggested prerequisites)",
+                key="ds_lab_related_btn",
+                use_container_width=True,
+            ):
+                with st.spinner("Finding labs that share this exercise's commands..."):
+                    try:
+                        st.session_state[rel_key] = related_labs_for_display(sel_lab)
+                    except Exception as exc:
+                        st.session_state[rel_key] = "ERROR: " + str(exc)
+
+            rel_cached = st.session_state.get(rel_key)
+            if isinstance(rel_cached, str):
+                st.error(rel_cached)
+            elif rel_cached:
+                st.markdown("**Related labs (suggested prerequisites)**")
+                st.caption(
+                    "Ranked by number of shared Tessent commands found in the "
+                    "verified lab corpus. A related lab is not a mandate — it is "
+                    "traceable evidence of what to review first."
+                )
+                for entry in rel_cached:
+                    st.markdown(
+                        "- **%s** — shares %d command(s): %s"
+                        % (
+                            entry["lab"],
+                            entry["count"],
+                            ", ".join("`%s`" % c for c in entry["shared"]),
+                        )
+                    )
+            elif rel_cached is not None:
+                st.info(
+                    "No other lab in the verified corpus shares commands with "
+                    "this exercise — nothing supportable to suggest."
+                )
             
             # Show all files at once
             lab_name = sel_lab.split(" / ")[0]
@@ -870,6 +1404,53 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
                     mime="text/markdown",
                     key="ds_lab_dl",
                 )
+                # Rapid Viva self-check (same shared helpers as video
+                # lessons): interactive lab assessment parsed
+                # deterministically from the report's own Rapid Viva
+                # section; a missing section abstains with a caption.
+                lab_viva_items = extract_rapid_viva_items(cached_lab)
+                lab_slug = sel_lab.replace(" / ", "_")
+                if lab_viva_items:
+                    with st.expander(
+                        "Rapid Viva Self-Check (%d questions)" % len(lab_viva_items),
+                        expanded=False,
+                    ):
+                        st.caption(
+                            "Type your answer per question and check it against "
+                            "the report's model answer. Nothing is sent anywhere; "
+                            "checking is local keyword overlap."
+                        )
+                        n_lab_show = min(len(lab_viva_items), 10)
+                        for lab_idx in range(n_lab_show):
+                            lab_item = lab_viva_items[lab_idx]
+                            st.markdown(
+                                "**Q%d. %s**" % (lab_idx + 1, lab_item["question"])
+                            )
+                            lab_attempt = st.text_area(
+                                "Your answer:",
+                                key="ds_lab_viva_attempt_" + lab_slug + "_" + str(lab_idx),
+                                height=68,
+                            )
+                            if st.button(
+                                "Check answer",
+                                key="ds_lab_viva_check_" + lab_slug + "_" + str(lab_idx),
+                            ):
+                                lab_verdict, lab_detail = check_viva_attempt(
+                                    lab_attempt, lab_item["answer"]
+                                )
+                                if lab_verdict == "full":
+                                    st.success("✅ Full credit. " + lab_detail)
+                                elif lab_verdict == "partial":
+                                    st.warning("🟡 Partial credit. " + lab_detail)
+                                else:
+                                    st.info("⬜ No credit yet. " + lab_detail)
+                            with st.expander("Model answer", expanded=False):
+                                st.markdown(lab_item["answer"])
+                else:
+                    st.caption(
+                        "Rapid Viva Self-Check unavailable for this report — "
+                        "no answerable rapid-fire section was found."
+                    )
 
     with st.expander("🔗 Lab ↔ Manual Cross-Reference", expanded=False):
         st.caption(
@@ -877,27 +1458,60 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
             "material is matched to its full manual definition (usage/options) with page citations, "
             "plus a reverse lookup of where else the command is used. No LLM, no hallucination."
         )
+        st.caption(
+            "⚠️ **Relationship types:** Only `DIRECTLY OBSERVED` relationships are currently "
+            "emitted (both commands confirmed in the same lab text). `INFERRED` and `VALIDATED` "
+            "types (PHASE_1_PLAN_APPROVED.md §9.1) require dofile/flow-step sequence files not "
+            "present in the current corpus and are reserved for future corpus enrichment."
+        )
+
         xr_lab = st.selectbox(
             "Cross-reference which lab?",
             list_lab_exercises(),
             key="xr_lab_sel",
         )
+
+        # Derive the module key from the lab display string.  The mapping is
+        # owned by agents.crossref_agent.module_for_lab_display(), which
+        # follows the canonical taxonomy (knowledge/canonical_taxonomy.json)
+        # so the UI and the agent cannot drift apart.  The "ATPG Core" course
+        # spans two canonical domains, so it is resolved per lab there.
+        xr_module = module_for_lab_display(xr_lab)
+
+        # Session-state key includes both module and lab so cached rows from a
+        # previous module/lab selection are never silently reused.
+        _xr_cache_key = "xr_rows_" + xr_module + "_" + xr_lab
+
         if st.button("🔍 Build Cross-Reference", key="xr_btn", use_container_width=True):
             with st.spinner("Extracting commands and matching manual definitions..."):
                 try:
-                    rows = crossref_lab(xr_lab)
-                    st.session_state["xr_rows_" + xr_lab] = rows
+                    rows = crossref_lab(xr_lab, module=xr_module)
+                    st.session_state[_xr_cache_key] = rows
                 except Exception as exc:
-                    st.session_state["xr_rows_" + xr_lab] = "ERROR: " + str(exc)
-        xr_cached = st.session_state.get("xr_rows_" + xr_lab)
-        if xr_cached:
+                    st.session_state[_xr_cache_key] = "ERROR: " + str(exc)
+
+        xr_cached = st.session_state.get(_xr_cache_key)
+        if xr_cached is not None:
             if isinstance(xr_cached, str):
                 st.error(xr_cached)
+            elif not xr_cached:
+                # WP-2: an empty result used to render nothing at all, which reads as a
+                # broken panel. Name the reason instead of leaving it blank.
+                st.info(
+                    "No exercise-level command evidence was found for this lab. This lab is one "
+                    "of the known gaps (workbook section absent, no command in the scope text, or "
+                    "no scope text at all) — no mapping is invented to fill it."
+                )
             else:
-                st.markdown(format_crossref_table(xr_cached))
+                # Pass lab_display=xr_lab so build_relationships() can perform
+                # the actual text co-occurrence check and emit DIRECTLY OBSERVED
+                # relationships.  Without this kwarg the relationship section is
+                # permanently suppressed.
+                _xr_md = format_crossref_table(xr_cached, lab_display=xr_lab)
+                st.markdown(_xr_md)
                 st.download_button(
                     "⬇️ Download cross-reference (.md)",
-                    data=format_crossref_table(xr_cached),
+                    data=_xr_md,
                     file_name="crossref_" + xr_lab.replace(" / ", "_") + ".md",
                     mime="text/markdown",
                     key="xr_dl_" + xr_lab,
@@ -917,104 +1531,369 @@ elif mode == "🔬 Deep Study (Videos & Labs)":
                 st.info("Not found in any lab slide material.")
 
 elif mode == "📝 Exam Question Bank (Real Questions)":
+    # ── Owner-only surface: fail-closed, enforced before any data is touched ──
+    # Selecting the mode directly (or priming session state) must not bypass
+    # this: authorization is decided here, from the authenticated identity.
+    if not require_owner("The Exam Question Bank"):
+        st.stop()
+
+    def _exam_owner_recheck(action: str) -> None:
+        """Re-authorize immediately before each sensitive Exam Bank operation."""
+        if not owner_verified():
+            st.error(f"🔒 {action} is restricted to the owner account.")
+            st.stop()
+
+    _exam_owner_recheck("Loading exam questions")
     st.header("📝 Exam Question Bank — Real Level 1 Exam Questions")
     st.caption(
-        "Practice with actual exam questions parsed from the training platform. "
-        "These are the real questions from the Level 1 Exam — not AI-generated."
+        "Practice with parsed Level 1 questions. Verified questions require independent "
+        "approved-corpus evidence for both the question and its answer."
     )
 
-    questions = load_questions()
+    questions = load_exam_questions()
     if not questions:
         st.warning("No exam questions found. The exam file may not be parsed yet.")
     else:
-        topics = get_topics()
-        col1, col2 = st.columns(2)
-        with col1:
-            sel_topic = st.selectbox(
-                "Filter by topic:",
-                ["All"] + topics,
-                key="exam_topic_sel",
+        filters = get_exam_filter_options(questions)
+        status = get_exam_corpus_status(questions)
+        st.caption(
+            f"{status['verified']} of {status['total']} records currently have verified corpus evidence "
+            f"(question and answer). {status['grounded']} records have question provenance grounded in the "
+            "approved exam corpus; their answer keys are still awaiting a reviewed evidence mapping."
+        )
+        include_unverified = st.checkbox(
+            "Include unverified material for review (not scored)",
+            value=default_exam_include_unverified(questions),
+            key="exam_include_unverified",
+        )
+
+        # WP-6: make the four statuses self-explanatory instead of implying an error.
+        with st.expander("ℹ️ What the statuses mean (and why nothing is verified)", expanded=False):
+            st.markdown(
+                "- **Verified (0 of 50)** — the *answer key* is backed by an independently "
+                "approved corpus page. None has been adjudicated yet because the Phase 4A "
+                "human decisions (Q12, Q9, Q15, Q19, Q34) are **deferred by governance**.\n"
+                "- **Grounded (49)** — the *question* text is traced to the approved exam "
+                "corpus; the answer is the parse of the source exam and is **not** verified.\n"
+                "- **Unmapped (1)** — the record could not be tied to a corpus page at all "
+                "(the Q12 fill-in-the-blank; its decision is deferred).\n"
+                "- **Unverified** — everything above. Use it for practice only; scores are "
+                "not authoritative and no answer is presented as verified.\n\n"
+                "The validator, the literal-answer evidence rule and the deferred decisions are "
+                "unchanged by this build. Nothing here marks an answer as correct."
             )
+
+        # WP-7: free-text search (text / option / question number) + coverage & export.
+        exam_search = st.text_input(
+            "🔎 Search questions (text, option, or number — e.g. lockup, 'clock sequential', 12, q47)",
+            value="",
+            key="exam_search_query",
+        )
+        if exam_search.strip():
+            _exam_owner_recheck("Exam Bank search")
+            questions = search_exam_questions(questions, exam_search)
+            st.caption(f"**{len(questions)}** record(s) match `{exam_search.strip()}`.")
+
+        with st.expander("📊 Coverage report & export", expanded=False):
+            _exam_owner_recheck("The coverage report")
+            _coverage = exam_coverage_report(questions)
+            st.markdown(
+                f"- Total records: **{_coverage['total']}**\n"
+                f"- Verified / scorable: **{_coverage['verified']}**\n"
+                f"- Status: `{_coverage['status_counts']}`\n"
+                f"- Records without question provenance: `{_coverage['unmapped_numbers'] or 'none'}`"
+            )
+            if _coverage["reason_counts"]:
+                st.caption("Blocking validation reasons (records affected):")
+                for _reason, _count in list(_coverage["reason_counts"].items())[:8]:
+                    st.caption(f"- {_count} × {_reason}")
+            _include_keys = st.checkbox(
+                "Include answers for verified records only",
+                value=False,
+                key="exam_export_keys",
+                help="Unverified answer keys are never exported, even when this is enabled.",
+            )
+            _exam_owner_recheck("Exam Bank export")
+            _export_md = export_exam_markdown(questions, include_answers=_include_keys)
+            _exam_owner_recheck("Exam Bank export download")
+            st.download_button(
+                "⬇️ Export question bank (.md)",
+                data=_export_md,
+                file_name="exam_question_bank.md",
+                mime="text/markdown",
+                key="exam_export_download",
+            )
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            sel_module = st.selectbox("Module:", ["All"] + filters["modules"], key="exam_module_sel")
         with col2:
+            sel_topic = st.selectbox("Topic:", ["All"] + filters["topics"], key="exam_topic_sel")
+        with col3:
+            sel_chapter = st.selectbox("Chapter:", ["All"] + filters["chapters"], key="exam_chapter_sel")
+        review_topics = get_exam_review_topics(questions)
+        sel_review_topic = st.selectbox(
+            "Prior exam grouping (review label only, not a canonical mapping):",
+            ["All"] + review_topics,
+            key="exam_review_topic_sel",
+        )
+        unclassified_only = st.checkbox("Only unclassified records", value=False, key="exam_unclassified_only")
+        randomized = st.checkbox("Randomize order with a reproducible seed", value=False, key="exam_randomized")
+        seed = None
+        if randomized:
+            seed = int(st.number_input("Selection seed", min_value=0, value=0, step=1, key="exam_seed"))
+        eligible = select_exam_questions(
+            questions,
+            module=None if sel_module == "All" else sel_module,
+            topic=None if sel_topic == "All" else sel_topic,
+            chapter=None if sel_chapter == "All" else sel_chapter,
+            review_topic=None if sel_review_topic == "All" else sel_review_topic,
+            include_unverified=include_unverified,
+            unclassified_only=unclassified_only,
+            seed=seed,
+        )
+        if not eligible:
+            if include_unverified:
+                st.info("No records match these filters.")
+            else:
+                st.info(
+                    "No verified questions are available for these filters. "
+                    "Enable review material to inspect unverified records without authoritative scoring."
+                )
+        else:
             num_q = st.slider(
                 "Number of questions:",
-                min_value=5,
-                max_value=min(48, len(questions)),
-                value=10,
+                min_value=1,
+                max_value=len(eligible),
+                value=min(10, len(eligible)),
                 key="exam_num_q",
             )
-
-        topic_filter = None if sel_topic == "All" else sel_topic
-        quiz_questions = get_questions_by_topic(topic=topic_filter, count=num_q, shuffle=True)
-
-        st.markdown(f"### 📋 Practice Quiz ({len(quiz_questions)} questions)")
-        st.markdown("Select your answer for each question, then click **Submit** to check.")
-
-        # Quiz form
-        user_answers = {}
-        for i, q in enumerate(quiz_questions):
-            st.markdown(f"---")
-            st.markdown(f"**Q{q['num']}:** {q['text']}")
-            if q.get('options'):
-                options = q['options']
-                if q.get('correct'):
-                    options = options + q['correct']
-                user_answers[q['num']] = st.radio(
-                    f"Your answer for Q{q['num']}:",
-                    options,
-                    key=f"exam_q_{q['num']}",
-                    index=None,
+            quiz_questions = eligible[:num_q]
+            quiz_has_verified = any(q["validation_status"] == "verified" for q in quiz_questions)
+            if quiz_has_verified:
+                st.markdown(f"### 📋 Practice Quiz ({len(quiz_questions)} questions)")
+                st.markdown("Select your answer for each question, then click **Submit** to check verified answers.")
+            else:
+                st.markdown(f"### 🟡 Review Quiz ({len(quiz_questions)} questions, not scored)")
+                st.markdown(
+                    "These records have no verified answer evidence. Answer them for your own review — "
+                    "**Submit** will not produce a score and will not reveal the stored answer key."
                 )
 
-        if st.button("✅ Submit Quiz", key="exam_submit", use_container_width=True):
-            if not any(v is not None for v in user_answers.values()):
-                st.warning("Please answer at least one question before submitting.")
-            else:
-                score = 0
-                total = 0
+            user_answers = {}
+            for q in quiz_questions:
+                st.markdown("---")
+                st.markdown(f"**Q{q['num']}:** {q['text']}")
+                st.caption(f"Status: {q['validation_status'].replace('_', ' ')}")
+                if q["validation_status"] == "verified":
+                    source = q["question_source"]
+                    st.caption(
+                        f"Question evidence: [Source: {source['source_path']}, "
+                        f"Page {source['page']}, Section {source['section']}]"
+                    )
+                else:
+                    st.caption(
+                        "🟡 Review material only — the answer key is not verified against the "
+                        "approved corpus, so this question is not scorable."
+                    )
+                    source = q.get("question_source")
+                    if source:
+                        st.caption(
+                            f"Question provenance: [Source: {source['source_path']}, "
+                            f"Page {source['page']}, Section {source['section']}]"
+                        )
+                    if q.get("validation_reasons"):
+                        st.caption("Not verified: " + "; ".join(q["validation_reasons"]))
+                if len(q.get("correct", [])) > 1 and q["validation_status"] == "verified":
+                    user_answers[q["question_id"]] = st.multiselect(
+                        f"Your answers for Q{q['num']}:", q["options"], key=f"exam_q_{q['question_id']}"
+                    )
+                else:
+                    user_answers[q["question_id"]] = st.radio(
+                        f"Your answer for Q{q['num']}:", q["options"], key=f"exam_q_{q['question_id']}", index=None
+                    )
+
+            if st.button("✅ Submit Quiz", key="exam_submit", use_container_width=True):
                 results = []
                 for q in quiz_questions:
-                    ua = user_answers.get(q['num'])
-                    if ua is None:
+                    answer = user_answers.get(q["question_id"])
+                    if answer is None or answer == []:
                         continue
-                    total += 1
-                    result = evaluate_exam_answer(q, ua)
-                    if result['correct']:
-                        score += 1
-                    results.append((q, ua, result))
-
-                if total > 0:
-                    pct = (score / total) * 100
-                    log_exam_quiz(
-                        sel_topic, score, total, pct,
-                        [(q['num'], ua, result['correct']) for q, ua, result in results]
-                    )
-                    st.markdown(f"### 📊 Score: {score}/{total} ({pct:.1f}%)")
-                    if pct >= 80:
-                        st.balloons()
-                        st.success("🎉 Excellent! You're ready for the real exam!")
-                    elif pct >= 60:
-                        st.success("👍 Passing level! Keep practicing to improve.")
+                    results.append((q, answer, evaluate_exam_answer(q, answer)))
+                if not results:
+                    st.warning("Please answer at least one question before submitting.")
+                else:
+                    scored = [(q, answer, result) for q, answer, result in results if result["scorable"]]
+                    if scored:
+                        score = sum(result["correct"] for _, _, result in scored)
+                        total = len(scored)
+                        pct = (score / total) * 100
+                        log_exam_quiz(sel_topic, score, total, pct, [(q["num"], answer, result["correct"]) for q, answer, result in scored])
+                        st.markdown(f"### 📊 Verified score: {score}/{total} ({pct:.1f}%)")
                     else:
-                        st.warning("📚 Needs more practice. Review the Deep Study reports for weak topics.")
-
+                        st.info("No answered questions had verified answer evidence, so no authoritative score was calculated.")
                     st.markdown("### 📋 Review Answers")
-                    for q, ua, result in results:
-                        st.markdown(f"---")
+                    for q, answer, result in results:
+                        st.markdown("---")
                         st.markdown(f"**Q{q['num']}:** {q['text']}")
-                        st.markdown(f"Your answer: *{ua}*")
-                        st.markdown(result['feedback'])
+                        st.markdown(f"Your answer: *{answer}*")
+                        st.markdown(result["feedback"])
+                        if result.get("answer_source"):
+                            source = result["answer_source"]
+                            st.caption(
+                                f"Answer evidence: [Source: {source['source_path']}, "
+                                f"Page {source['page']}, Section {source['section']}]"
+                            )
+                        if result.get("explanation"):
+                            st.markdown(result["explanation"])
 
 elif mode == "📦 Batch Export (All Reports)":
-    st.header("📦 Batch Export — Generate All Reports to Files")
+    st.header("📦 Batch Export")
+    st.subheader("Canonical taxonomy export (offline)")
+    st.caption(
+        "Deterministic Markdown export from `canonical_taxonomy.json`. This mode never calls an LLM, "
+        "rebuilds the index, or changes the knowledge base."
+    )
+    try:
+        _canonical_exporter = BatchExporter(Path(__file__).resolve().parent)
+        _export_records = _canonical_exporter.records()
+
+        # WP-4: Module -> Submodule -> Chapter/Lesson -> Theory/Lab, with live counts.
+        _COURSE_ORDER = [
+            "ATPG Core Topics",
+            "ATPG with TestKompress",
+            "Tessent Shell Introduction",
+            "ATPG Advanced Topics",
+            "Tessent Shell",
+            "Library User Manual",
+            "Other corpus material",
+        ]
+
+        def _course_rank(record):
+            course = record.node.get("course") or "Other corpus material"
+            try:
+                return _COURSE_ORDER.index(course)
+            except ValueError:
+                return len(_COURSE_ORDER)
+
+        _module_options = ["All modules"] + [c for c in _COURSE_ORDER
+                                             if any((r.node.get("course") or "Other corpus material") == c for r in _export_records)]
+        _scope_module = st.selectbox("Module", _module_options, key="canonical_export_module")
+        _module_records = [
+            r for r in _export_records
+            if _scope_module == "All modules" or (r.node.get("course") or "Other corpus material") == _scope_module
+        ]
+
+        _kind_labels = ["Theory + Lab", "Theory only", "Lab only", "All content"]
+        _scope_kind = st.selectbox("Content type", _kind_labels, key="canonical_export_kind")
+        if _scope_kind == "Theory only":
+            _kind_records = [r for r in _module_records if r.node.get("classification") == "Theory"]
+        elif _scope_kind == "Lab only":
+            _kind_records = [r for r in _module_records if r.node.get("classification") == "Lab"]
+        elif _scope_kind == "Theory + Lab":
+            _kind_records = [r for r in _module_records if r.node.get("classification") in ("Theory", "Lab")]
+        else:
+            _kind_records = list(_module_records)
+
+        _submodule_options = sorted({str(r.node.get("submodule", "")) for r in _kind_records})
+        _selected_submodules = st.multiselect(
+            "Submodules (leave empty for every submodule)",
+            _submodule_options, default=[], key="canonical_export_submodules",
+        )
+        _sub_records = [
+            r for r in _kind_records
+            if not _selected_submodules or str(r.node.get("submodule", "")) in _selected_submodules
+        ]
+
+        _chapter_options = sorted({str(r.node.get("chapter", "")) for r in _sub_records})
+        _selected_chapters = st.multiselect(
+            "Chapters / lessons (leave empty for every one)",
+            _chapter_options, default=[], key="canonical_export_chapters",
+        )
+        _scoped_records = [
+            r for r in _sub_records
+            if not _selected_chapters or str(r.node.get("chapter", "")) in _selected_chapters
+        ]
+        # Curriculum order, not alphabetical domain order.
+        _scoped_records.sort(key=lambda r: (
+            _course_rank(r), str(r.node.get("submodule", "")), str(r.node.get("chapter", "")), str(r.node.get("topic", "")),
+        ))
+
+        st.caption(
+            f"Selected scope: **{len(_scoped_records)}** node(s) — theory "
+            f"{sum(1 for r in _scoped_records if r.node.get('classification') == 'Theory')}, lab "
+            f"{sum(1 for r in _scoped_records if r.node.get('classification') == 'Lab')}, "
+            f"unclassified {sum(1 for r in _scoped_records if not r.node.get('classification'))}."
+        )
+        st.info("ℹ️ Chapter-level export is currently unavailable because reliable chapter boundaries cannot be established from available sources.")
+        st.caption("Policy A is active: only explicit Theory/Lab metadata is eligible. Unclassified nodes are not inferred.")
+
+        _record_labels = {
+            record.key: f"{record.node.get('course') or 'Other'} / {record.node.get('submodule')} / "
+                         f"{record.node.get('chapter')} / {record.node.get('topic')}"
+            for record in _scoped_records
+        }
+        _selected_keys = st.multiselect(
+            "Fine-tune individual nodes (leave empty to export the whole scope)",
+            list(_record_labels), format_func=_record_labels.get, default=[], key="canonical_export_nodes",
+        )
+        if not _selected_keys:
+            _selected_keys = [record.key for record in _scoped_records]
+
+        if st.button("Prepare canonical Markdown export", key="canonical_export_run", use_container_width=True):
+            _canonical_result = _canonical_exporter.export(
+                ExportMode.MULTIPLE,
+                selected_keys=_selected_keys,
+            )
+            st.session_state["canonical_export_result"] = _canonical_result
+        _canonical_result = st.session_state.get("canonical_export_result")
+        if _canonical_result:
+            st.json(_canonical_result.summary)
+            for _diagnostic in _canonical_result.diagnostics:
+                st.warning(_diagnostic)
+            st.download_button(
+                "Download canonical export (.md)",
+                data=_canonical_result.markdown,
+                file_name=f"canonical_taxonomy_{_canonical_result.summary['selected']}_nodes.md",
+                mime="text/markdown",
+                key="canonical_export_download",
+            )
+    except (OSError, ValueError, json.JSONDecodeError) as _export_error:
+        st.error(f"Canonical Batch Export is unavailable: {_export_error}")
+
+    st.divider()
+    st.subheader("Legacy Deep Study report export")
     st.caption(
         "Generate all Deep Study reports (video lessons + lab exercises) at once, "
         "saved as .md files on disk. No need to click through each one in the UI."
     )
 
+    # WP-4: counts are computed from the corpus, never hard-coded. The historical
+    # "70 lessons / 14 labs" labels were ATPG-Core-only figures that misdescribed the
+    # four-module curriculum.
+    _ds_modules = list_video_modules()
+    _ds_lessons_total = sum(len(list_video_lessons(key)) for key in _ds_modules)
+    _ds_labs = list_lab_exercises()
+    st.caption(
+        f"Available across all courses: **{len(_ds_modules)} modules**, "
+        f"**{_ds_lessons_total} video lessons**, **{len(_ds_labs)} lab exercises**."
+    )
+
+    _selected_ds_modules = st.multiselect(
+        "Limit to modules (leave empty for all)",
+        sorted(_ds_modules.values()),
+        default=[],
+        key="batch_modules",
+    )
+
+    _scope_labels = {
+        "Video lessons": f"All video lessons ({_ds_lessons_total})",
+        "Lab exercises": f"All lab exercises ({len(_ds_labs)})",
+        "Everything": f"Everything ({_ds_lessons_total + len(_ds_labs)} reports)",
+    }
     export_type = st.radio(
         "What to export:",
-        ["All Video Lessons (70 lessons)", "All Lab Exercises (14 labs)", "Everything (lessons + labs)"],
+        list(_scope_labels),
+        format_func=_scope_labels.get,
         key="batch_type",
     )
 
@@ -1025,26 +1904,30 @@ elif mode == "📦 Batch Export (All Reports)":
     )
 
     if st.button("🚀 Start Batch Export", key="batch_start", use_container_width=True):
-        # Determine what to export
-        if export_type == "All Video Lessons (70 lessons)":
-            mods = list_video_modules()
-            items = []
-            for num in sorted(mods.keys()):
-                lessons = list_video_lessons(num)
-                for lesson in lessons:
+        # Determine what to export (module filter honoured for lessons; labs carry their
+        # course in the bracket prefix used by list_lab_exercises()).
+        def _module_allowed(display_name, module_label):
+            if not _selected_ds_modules:
+                return True
+            course = module_label.split("]", 1)[0].lstrip("[")
+            return any(course in selected for selected in _selected_ds_modules)
+
+        items = []
+        if export_type in ("Video lessons", "Everything"):
+            for num in sorted(_ds_modules.keys()):
+                if not _module_allowed(_ds_modules[num], _ds_modules[num]):
+                    continue
+                for lesson in list_video_lessons(num):
                     items.append(("lesson", num, lesson))
-        elif export_type == "All Lab Exercises (14 labs)":
-            labs = list_lab_exercises()
-            items = [("lab", lab, None) for lab in labs]
-        else:  # Everything
-            mods = list_video_modules()
-            items = []
-            for num in sorted(mods.keys()):
-                lessons = list_video_lessons(num)
-                for lesson in lessons:
-                    items.append(("lesson", num, lesson))
-            labs = list_lab_exercises()
-            items.extend([("lab", lab, None) for lab in labs])
+        if export_type in ("Lab exercises", "Everything"):
+            for lab in _ds_labs:
+                if not _module_allowed(lab, lab):
+                    continue
+                items.append(("lab", lab, None))
+
+        if not items:
+            st.warning("No items match the selected modules and scope.")
+            st.stop()
 
         st.info(f"Generating {len(items)} reports...")
 
@@ -1079,4 +1962,326 @@ elif mode == "📦 Batch Export (All Reports)":
         st.success(f"Done! {success} reports saved to '{output_dir}/'. {failed} failed.")
         if failed == 0:
             st.balloons()
+
+# =====================================
+# 11. PPT EXPLAINER (WP-10)
+# =====================================
+elif mode == "🧾 PPT Explainer":
+    import hashlib
+
+    from core.ppt_explainer import (PptExplainerError, estimate_deck_usage, explain_deck,
+                                    explain_slide, extract_deck)
+
+    try:
+        from core.session_logger import log_ppt_explainer
+    except Exception:  # pragma: no cover - logging must never break the UI
+        def log_ppt_explainer(*args, **kwargs):
+            return None
+
+    st.header("🧾 PPT Explainer")
+    st.caption(
+        "Upload a .pptx deck and get slide-by-slide technical explanations grounded in the "
+        "Tessent knowledge base. Uploaded presentations are processed locally and are never "
+        "written to the session log or its upload payload."
+    )
+
+    _ppt_file = st.file_uploader(
+        "Upload a PowerPoint presentation (.pptx only)",
+        type=["pptx"],
+        key="ppt_explainer_upload",
+        help="Legacy binary .ppt files are rejected: save the deck as .pptx first.",
+    )
+
+    if _ppt_file is None:
+        st.info(
+            "Supported: `.pptx`. Slides are extracted in order; you can explain one slide at a "
+            "time or the whole deck. Model use is optional — extraction and knowledge-base "
+            "lookup still work without it."
+        )
+        st.stop()
+
+    _ppt_bytes = _ppt_file.getvalue()
+
+    # WP-10 privacy: never persist the upload. persist=False writes nothing under
+    # session_logs/attachments/ and returns an empty string.
+    _stored = save_attachment(_ppt_bytes, _ppt_file.name, persist=False)
+    if _stored:
+        st.warning("Unexpected: a content-sensitive upload reported a stored path. Nothing was logged.")
+
+    _digest = hashlib.sha256(_ppt_bytes).hexdigest()[:16]
+    _deck_cache = st.session_state.setdefault("ppt_decks", {})
+    _explain_cache = st.session_state.setdefault("ppt_explanations", {})
+
+    if _digest not in _deck_cache:
+        try:
+            _deck_cache[_digest] = extract_deck(_ppt_bytes, _ppt_file.name)
+        except PptExplainerError as _ppt_error:
+            st.error(f"Could not read this presentation: {_ppt_error}")
+            st.stop()
+
+    _deck = _deck_cache[_digest]
+    if not _deck.slides:
+        st.warning("This presentation contains no slides.")
+        st.stop()
+
+    st.success(f"Extracted **{_deck.slide_count}** slide(s), in order.")
+    _empty_slides = [slide.number for slide in _deck.slides if slide.is_empty]
+    if _empty_slides:
+        st.caption(f"Slides with no extractable text, table or notes: {_empty_slides}")
+    if _deck.warnings:
+        with st.expander(f"⚠️ Extraction notes ({len(_deck.warnings)})", expanded=False):
+            for _warning in _deck.warnings[:40]:
+                st.caption(f"- {_warning}")
+
+    _pictures_total = sum(slide.picture_count for slide in _deck.slides)
+    _ctl_col1, _ctl_col2 = st.columns([2, 1])
+    with _ctl_col1:
+        _interpret_images = st.checkbox(
+            f"🖼️ Describe the deck's pictures with the vision model "
+            f"({_pictures_total} picture(s) found)",
+            value=bool(_pictures_total),
+            disabled=not _pictures_total,
+            key=f"ppt_interpret_images_{_digest}",
+            help=(
+                "Pictures are the deck's own material: descriptions are marked unverified, "
+                "never cited as manual evidence, and never written to disk or logs. "
+                "Turning this off avoids every vision call."
+            ),
+        )
+    with _ctl_col2:
+        if st.button("🧹 Clear this deck from the session", key=f"ppt_clear_{_digest}",
+                     use_container_width=True):
+            _deck_cache.pop(_digest, None)
+            for _key in [k for k in st.session_state if str(k).startswith("ppt_deck_result_")]:
+                st.session_state.pop(_key, None)
+            for _key in [k for k in _explain_cache if isinstance(k, tuple) and k[0] == _digest]:
+                _explain_cache.pop(_key, None)
+            st.session_state.pop(f"ppt_slide_select_{_digest}", None)
+            st.info("Deck removed from this browser session. Nothing was written to disk.")
+            st.rerun()
+
+    _estimate = estimate_deck_usage(_deck, interpret_images=_interpret_images)
+    with st.expander("💵 Estimated work for this deck (before running)", expanded=False):
+        st.markdown(
+            f"- Slides: **{_estimate['slides']}**\n"
+            f"- Estimated explanation calls: **{_estimate['estimated_explanation_calls']}** "
+            f"(one per slide + one synthesis)\n"
+            f"- Estimated vision calls: **{_estimate['estimated_vision_calls']}**\n"
+            f"- Estimated total calls: **{_estimate['estimated_total_calls']}**"
+        )
+        st.caption(
+            "Counts only. No provider price is applied, and no token figure is invented — "
+            "actual usage after a run is shown separately."
+        )
+
+    st.markdown("#### Slides")
+    for _slide in _deck.slides:
+        _status = "🟡 empty" if _slide.is_empty else "📄 text"
+        if _slide.picture_count:
+            _status += f" · 🖼️ {_slide.picture_count}"
+        st.caption(f"- {_slide.display_label()} — {_status}")
+
+
+    _labels = {slide.number: slide.display_label() for slide in _deck.slides}
+    _nav_col1, _nav_col2, _nav_col3 = st.columns([2, 1, 1])
+    with _nav_col1:
+        _selected_slide = st.selectbox(
+            "Navigate to a slide",
+            list(_labels),
+            format_func=_labels.get,
+            key=f"ppt_slide_select_{_digest}",
+        )
+    with _nav_col2:
+        if st.button("⬅️ Previous", disabled=_selected_slide <= 1,
+                     key=f"ppt_prev_{_digest}", use_container_width=True):
+            st.session_state[f"ppt_slide_select_{_digest}"] = max(1, _selected_slide - 1)
+            st.rerun()
+    with _nav_col3:
+        if st.button("Next ➡️", disabled=_selected_slide >= _deck.slide_count,
+                     key=f"ppt_next_{_digest}", use_container_width=True):
+            st.session_state[f"ppt_slide_select_{_digest}"] = min(_deck.slide_count, _selected_slide + 1)
+            st.rerun()
+
+    _slide_obj = _deck.slides[_selected_slide - 1]
+    with st.expander(f"📄 Extracted content — {_labels[_selected_slide]}", expanded=True):
+        if _slide_obj.text:
+            st.markdown("\n".join(f"- {line}" for line in _slide_obj.text.splitlines() if line.strip()))
+        else:
+            st.caption("No extractable text on this slide.")
+        for _table in _slide_obj.tables:
+            st.table(_table[:20])
+        if _slide_obj.notes:
+            st.caption("Speaker notes:")
+            st.markdown(_slide_obj.notes)
+        for _warning in _slide_obj.warnings:
+            st.caption(f"⚠️ {_warning}")
+
+    def _render_slide_result(_result):
+        st.markdown(f"#### {_result['label']}")
+        _coverage = _result.get("coverage")
+        if _coverage == "grounded":
+            st.caption(f"Knowledge-base support: {len(_result['evidence'])} relevant chunk(s) retrieved.")
+        elif _coverage == "weak_evidence":
+            _relevance = _result.get("relevance") or {}
+            st.caption(
+                "Knowledge-base support: **weak** — nothing retrieved shares the slide's key "
+                f"terms ({_relevance.get('matched_terms', 0)} of "
+                f"{_relevance.get('slide_terms', 0)}). Treat the explanation as unverified."
+            )
+        elif _coverage == "no_evidence":
+            st.caption(
+                "Knowledge-base support: none retrieved for this slide. The explanation is "
+                "limited to what the slide itself shows."
+            )
+        else:
+            st.caption("Knowledge-base support: reference lookup was skipped.")
+
+        if _result.get("explanation"):
+            st.markdown(_result["explanation"])
+        elif _result.get("empty"):
+            st.info("This slide has no extractable content to explain.")
+        else:
+            st.info("No explanation generated yet for this slide.")
+
+        if _result.get("model_error"):
+            st.warning(
+                f"Model unavailable ({_result['model_error']}). Extraction and references are "
+                "still available; retry when the model is reachable."
+            )
+
+        if _result.get("citations"):
+            with st.expander(f"📖 Reference citations ({len(_result['citations'])})", expanded=False):
+                for _citation in _result["citations"]:
+                    st.caption(f"- {_citation}")
+                st.caption(
+                    "Slide content is shown separately above; citations come only from the "
+                    "knowledge base."
+                )
+        elif _coverage == "no_evidence":
+            st.caption("No knowledge-base citations: the sources do not cover this slide.")
+
+        _images = _result.get("images") or {}
+        if _images.get("observations"):
+            with st.expander(
+                f"🖼️ Visual observations ({len(_images['observations'])}) — unverified",
+                expanded=False,
+            ):
+                for _obs in _images["observations"]:
+                    st.markdown(f"- **{_obs['picture']}**: {_obs['description']}")
+                st.caption(
+                    "Described from the deck's own pictures. This is not manual evidence: it "
+                    "carries no page number and is never used as the source of a technical claim."
+                )
+        elif _images.get("error"):
+            st.caption(
+                f"Picture description unavailable ({_images['error']}); the text explanation is "
+                "unaffected."
+            )
+        elif _result.get("picture_count") and _images.get("available") is False:
+            st.caption("Picture description was skipped for this slide.")
+
+    _run_col1, _run_col2 = st.columns(2)
+    with _run_col1:
+        _explain_one = st.button("🔍 Explain this slide", key=f"ppt_explain_one_{_digest}",
+                                 use_container_width=True)
+    with _run_col2:
+        _explain_all = st.button("📚 Explain the whole deck", key=f"ppt_explain_all_{_digest}",
+                                 use_container_width=True)
+
+    if _explain_one:
+        if not ensure_llm_access():
+            st.stop()
+        with st.spinner(f"Explaining slide {_selected_slide}..."):
+            _explain_cache[(_digest, _selected_slide)] = explain_slide(
+                _deck, _selected_slide, interpret_images=_interpret_images)
+        log_ppt_explainer(_deck.slide_count, 1, "single_slide")
+
+    _cached_single = _explain_cache.get((_digest, _selected_slide))
+    if _cached_single:
+        _render_slide_result(_cached_single)
+
+    if _explain_all:
+        if not ensure_llm_access():
+            st.stop()
+        _progress = st.progress(0)
+        _status = st.empty()
+
+        def _on_progress(done, total):
+            _progress.progress(done / max(1, total))
+            _status.text(f"Explained {done}/{total} slide(s)...")
+
+        with st.spinner("Explaining every slide in order... this can take a while for a long deck."):
+            _deck_result = explain_deck(_deck, interpret_images=_interpret_images,
+                                        on_progress=_on_progress)
+        for _item in _deck_result["slides"]:
+            _explain_cache[(_digest, _item["slide_number"])] = _item
+        st.session_state[f"ppt_deck_result_{_digest}"] = _deck_result
+        log_ppt_explainer(_deck.slide_count, _deck_result["explained_count"], "whole_deck")
+        _progress.progress(1.0)
+        _status.text("Deck explained.")
+
+    _deck_result = st.session_state.get(f"ppt_deck_result_{_digest}")
+    if _deck_result:
+        st.markdown("---")
+        st.markdown("### 📚 Whole-deck explanation")
+        st.caption(
+            f"{_deck_result['explained_count']} of {_deck_result['slide_count']} slide(s) explained."
+        )
+        if _deck_result.get("synthesis"):
+            with st.expander("🧭 Presentation-level synthesis", expanded=True):
+                st.markdown(_deck_result["synthesis"])
+        elif _deck_result.get("synthesis_error"):
+            st.warning(
+                f"Presentation synthesis unavailable ({_deck_result['synthesis_error']}). "
+                "Per-slide explanations are below."
+            )
+        for _item in _deck_result["slides"]:
+            with st.expander(_item["label"], expanded=False):
+                _render_slide_result(_item)
+
+        _usage = _deck_result.get("usage") or {}
+        if _usage:
+            with st.expander("📈 Actual usage for this deck run", expanded=False):
+                _actual = _usage.get("actual") or {}
+                _planned = _usage.get("estimated") or {}
+                st.markdown(
+                    f"- Explanation calls: **{_actual.get('explanation_calls', 0)}** "
+                    f"(estimated {_planned.get('estimated_explanation_calls', 0)})\n"
+                    f"- Vision calls: **{_actual.get('vision_calls', 0)}** "
+                    f"(estimated {_planned.get('estimated_vision_calls', 0)})"
+                )
+                if _actual.get("failed_vision_calls"):
+                    st.caption(
+                        f"{_actual['failed_vision_calls']} picture(s) could not be described; "
+                        "the text explanations are unaffected."
+                    )
+                _budget = _usage.get("budget")
+                if isinstance(_budget, dict) and _budget.get("max_calls") is not None:
+                    st.caption(
+                        f"Session budget: {_budget.get('calls', 0)} call(s) used of "
+                        f"{_budget['max_calls']}, {_budget.get('remaining_calls')} remaining."
+                    )
+                st.caption(_actual.get("token_note") or "Token usage is unavailable for this call path.")
+
+        _export_lines = [f"# PPT Explainer — {_deck.slide_count} slide(s)", ""]
+        for _item in _deck_result["slides"]:
+            _export_lines.append(f"## {_item['label']}")
+            if _item.get("explanation"):
+                _export_lines.append(_item["explanation"])
+            if _item.get("citations"):
+                _export_lines.append("")
+                _export_lines.append("References:")
+                _export_lines.extend(f"- {_citation}" for _citation in _item["citations"])
+            if _item.get("coverage") == "no_evidence":
+                _export_lines.append("_No knowledge-base evidence was retrieved for this slide._")
+            _export_lines.append("")
+        if _deck_result.get("synthesis"):
+            _export_lines.extend(["## Presentation synthesis", _deck_result["synthesis"], ""])
+        st.download_button(
+            "⬇️ Download explanations (.md)",
+            data="\n".join(_export_lines),
+            file_name="ppt_explanations.md",
+            mime="text/markdown",
+            key=f"ppt_export_{_digest}",
+        )
 
