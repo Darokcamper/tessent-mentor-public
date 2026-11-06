@@ -21,7 +21,7 @@ from __future__ import annotations
 import io
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 SUPPORTED_SUFFIXES = (".pptx",)
 
@@ -48,7 +48,13 @@ class Slide:
 
     @property
     def is_empty(self) -> bool:
-        return not (self.title.strip() or self.text.strip() or self.tables or self.notes.strip())
+        """True only when the slide carries nothing at all - pictures count as content.
+
+        Image-only decks are the common case here: a slide that is just a figure is NOT
+        empty, it simply has no text.
+        """
+        return not (self.title.strip() or self.text.strip() or self.tables
+                    or self.notes.strip() or self.picture_count)
 
     def retrieval_text(self) -> str:
         """Text used to look for supporting evidence (title first, then body)."""
@@ -235,14 +241,20 @@ def _slide_terms(text: str) -> List[str]:
     return terms
 
 
-def evidence_relevance(slide: Slide, evidence: List[Dict[str, Any]]) -> Dict[str, Any]:
+def evidence_relevance(slide: Slide, evidence: List[Dict[str, Any]],
+                       extra_text: str = "") -> Dict[str, Any]:
+    # ``extra_text`` carries the picture descriptions. An image-led slide has no words of its
+    # own, so scoring against the slide text alone would always report "weak evidence" even
+    # when the retrieved pages match the figure exactly. Judge against what was searched.
     """How much of the slide's own vocabulary the retrieved evidence actually covers.
 
     ``overlap`` is the share of the slide's distinctive terms found in the retrieved
     text. It is deliberately simple and explainable — a lexical signal, not a claim of
     semantic entailment — and it never influences abstention, only the coverage label.
     """
-    terms = _slide_terms(slide.retrieval_text())
+    query_text = " ".join(part for part in (slide.retrieval_text(),
+                                            str(extra_text or "")) if part)
+    terms = _slide_terms(query_text)
     haystack = " ".join(str(item.get("text") or "") for item in evidence).lower()
     matched = [term for term in terms if term in haystack]
     overlap = (len(matched) / len(terms)) if terms else 0.0
@@ -355,6 +367,81 @@ def interpret_slide_images(
     return result
 
 
+def visual_query(images: Dict[str, Any], limit: int = 600) -> str:
+    """Search terms taken from the vision descriptions of a slide's own pictures.
+
+    This is what makes an image-only deck usable: the pictures are described first, and the
+    description becomes part of the knowledge-base query, so the explanation can cite manual
+    pages instead of falling back to "not covered by the knowledge base".
+    """
+    parts = [str(item.get("description") or "") for item in (images.get("observations") or [])]
+    return " ".join(part.strip() for part in parts if part.strip())[:limit]
+
+
+def slide_sources(slide: Slide, evidence: List[Dict[str, Any]],
+                  images: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Everything one slide explanation is built from, labelled by kind.
+
+    ``slide``  - the deck slide itself: the subject, never evidence of a Tessent fact
+    ``manual`` - knowledge-base chunks, each carrying a real file name and page number
+    ``visual`` - unverified descriptions of the slide's own pictures (no page number)
+    """
+    sources: List[Dict[str, Any]] = [{"kind": "slide", "label": f"Slide {slide.number} (this deck)"}]
+    for item in evidence or []:
+        sources.append({
+            "kind": "manual",
+            "label": item.get("citation") or f"[Source: {item.get('source')}, Page {item.get('page')}]",
+            "file": item.get("source"),
+            "page": item.get("page"),
+        })
+    for item in ((images or {}).get("observations") or []):
+        sources.append({
+            "kind": "visual",
+            "label": f"picture '{item.get('picture')}' - description is unverified",
+        })
+    return sources
+
+
+def parse_slide_selection(spec: str, total: int) -> List[int]:
+    """Parse a slide selection into 1-based numbers.
+
+    Accepts ``""``/``all``/``*`` for the whole deck, single numbers (``3``), ranges
+    (``1-5``) and comma or space separated combinations (``1-5, 8, 12``).
+    Raises ``PptExplainerError`` with a readable message on anything else.
+    """
+    if total < 1:
+        return []
+    text = str(spec or "").strip()
+    if not text or text.lower() in {"all", "*", "every", "whole"}:
+        return list(range(1, total + 1))
+
+    numbers: List[int] = []
+    for chunk in re.split(r"[,\s]+", text):
+        if not chunk:
+            continue
+        match = re.fullmatch(r"(\d{1,4})\s*-\s*(\d{1,4})", chunk)
+        if match:
+            start, end = int(match.group(1)), int(match.group(2))
+            if start > end:
+                start, end = end, start
+            numbers.extend(range(start, end + 1))
+            continue
+        if re.fullmatch(r"\d{1,4}", chunk):
+            numbers.append(int(chunk))
+            continue
+        raise PptExplainerError(
+            f"Could not read '{chunk}'. Use slide numbers (3), ranges (1-5) or a "
+            "comma-separated mix (1-5, 8, 12), or leave it blank for the whole deck."
+        )
+
+    selected = sorted({number for number in numbers if 1 <= number <= total})
+    if not selected:
+        raise PptExplainerError(
+            f"No slide in that selection exists in this deck (valid range 1-{total})."
+        )
+    return selected
+
+
 def _observations_block(images: Dict[str, Any]) -> Optional[str]:
     observations = images.get("observations") or []
     if not observations:
@@ -368,12 +455,26 @@ def _observations_block(images: Dict[str, Any]) -> Optional[str]:
         lines.append(f"- picture '{item['picture']}': {item['description']}")
     if images.get("skipped"):
         lines.append(f"- ({images['skipped']} further picture(s) were not analysed.)")
+    # Only stated when observations exist, so a text-only slide is never told about pictures.
+    lines.append(
+        "If this slide is mostly a figure (little or no text), describe what it shows from "
+        "these observations, state that the description is unverified, and still cite the "
+        "reference context for every concept the figure depicts - the retrieval used these "
+        "observations, so supporting pages normally exist."
+    )
     return "\n".join(lines)
 
 
-def gather_evidence(slide: Slide, retrieve_fn: Optional[Callable] = None, top_k: int = 6) -> List[Dict[str, Any]]:
-    """Knowledge-base chunks that may support this slide. Never invents a citation."""
-    query = slide.retrieval_text().strip()
+def gather_evidence(slide: Slide, retrieve_fn: Optional[Callable] = None, top_k: int = 6,
+                    extra_query: str = "") -> List[Dict[str, Any]]:
+    """Knowledge-base chunks that may support this slide. Never invents a citation.
+
+    ``extra_query`` carries the vision descriptions of the slide's own pictures, so an
+    image-led slide (no extractable text) still searches the manuals for the concepts the
+    figure shows instead of returning nothing.
+    """
+    query = " ".join(part for part in (slide.retrieval_text().strip(),
+                                      str(extra_query or "").strip()) if part).strip()
     if not query:
         return []
     retrieve_fn = retrieve_fn or _default_retrieve
@@ -508,13 +609,18 @@ def explain_slide(
         raise PptExplainerError(f"Slide {index} is out of range (1-{deck.slide_count}).")
 
     slide = deck.slides[int(index) - 1]
-    evidence = gather_evidence(slide, retrieve_fn=retrieve_fn, top_k=top_k)
-    relevance = evidence_relevance(slide, evidence)
     images = (interpret_slide_images(slide, vision_fn=vision_fn)
               if interpret_images and slide.pictures else
               {"available": bool(slide.pictures), "analysed": 0,
                "skipped": len(slide.pictures), "observations": [], "error": None,
                "kind": "visual_observation", "verified": False})
+
+    # Pictures first, then retrieval: for an image-led deck the vision description IS the
+    # query, which is what makes a real manual citation possible instead of "not covered".
+    picture_terms = visual_query(images)
+    evidence = gather_evidence(slide, retrieve_fn=retrieve_fn, top_k=top_k,
+                               extra_query=picture_terms)
+    relevance = evidence_relevance(slide, evidence, extra_text=picture_terms)
 
     result: Dict[str, Any] = {
         "slide_number": slide.number,
@@ -529,6 +635,8 @@ def explain_slide(
         "empty": slide.is_empty,
         "evidence": evidence,
         "citations": [item["citation"] for item in evidence],
+        "sources": slide_sources(slide, evidence, images),
+        "picture_terms_used": bool(picture_terms),
         "relevance": relevance,
         "coverage": relevance["label"],
         "explanation": None,
@@ -626,15 +734,33 @@ def explain_deck(
     generate: bool = True,
     top_k: int = 6,
     on_progress: Optional[Callable[[int, int], None]] = None,
+    slides: Optional[Iterable[int]] = None,
 ) -> Dict[str, Any]:
-    """Explain every slide in order, then synthesise. Never skips a slide silently."""
+    """Explain the selected slides in order, then synthesise. Never skips a slide silently.
+
+    ``slides`` takes 1-based slide numbers (see :func:`parse_slide_selection`); omit it for the
+    whole deck. A custom set explains exactly those slides and synthesises only over them.
+    """
+    if slides is None:
+        selected = [slide.number for slide in deck.slides]
+    else:
+        selected = []
+        for number in slides:
+            value = int(number)
+            if 1 <= value <= deck.slide_count and value not in selected:
+                selected.append(value)
+        if not selected:
+            raise PptExplainerError(
+                f"No valid slide in the selection (deck has {deck.slide_count})."
+            )
+
     results = []
-    total = deck.slide_count
-    for slide in deck.slides:
+    total = len(selected)
+    for position, number in enumerate(selected, start=1):
         results.append(
             explain_slide(
                 deck,
-                slide.number,
+                number,
                 retrieve_fn=retrieve_fn,
                 llm_fn=llm_fn,
                 vision_fn=vision_fn,
@@ -645,12 +771,14 @@ def explain_deck(
         )
         if on_progress is not None:
             try:
-                on_progress(slide.number, total)
+                on_progress(position, total)
             except Exception:
                 pass
 
     payload = {
-        "slide_count": total,
+        "slide_count": deck.slide_count,
+        "selected_slides": selected,
+        "explained_slides": total,
         "explained_count": sum(1 for r in results if r.get("explanation")),
         "slides": results,
         "warnings": list(deck.warnings),

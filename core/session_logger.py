@@ -160,6 +160,54 @@ def _get_github_token():
         return ""
 
 
+DIVIDER = "=" * 78
+_ENTRY_TIME_RE = re.compile(r"^TIME\s*:\s*(.+?)\s*$", re.M)
+
+
+def split_entries(text: str) -> list:
+    """Split a daily log into its entries (the ``====`` separated blocks _write_block emits)."""
+    entries = []
+    current = []
+    for line in str(text or "").splitlines():
+        if line.rstrip() == DIVIDER:
+            if current:
+                entries.append("\n".join(current).strip())
+                current = []
+            current.append(line.rstrip())
+            continue
+        if current:
+            current.append(line.rstrip())
+    if current:
+        entries.append("\n".join(current).strip())
+    return [entry for entry in entries if entry.strip(DIVIDER).strip()]
+
+
+def _entry_time(entry: str) -> str:
+    match = _ENTRY_TIME_RE.search(entry)
+    return match.group(1) if match else ""
+
+
+def merge_log_texts(*texts: str) -> str:
+    """Union of log entries across versions, de-duplicated and ordered by entry time.
+
+    Why this exists: the app appends to a **container-local** daily file and used to upload
+    that file wholesale. A fresh container starts with an empty file, so its first upload
+    replaced everything an earlier container had pushed for the same day (observed
+    2026-11-06: 6 entries -> 1). Merging before upload makes the remote file additive, so
+    the archive no longer depends on recovering old versions from git.
+    """
+    seen = {}
+    for text in texts:
+        for entry in split_entries(text or ""):
+            key = re.sub(r"\s+", " ", entry).strip()
+            if key and key not in seen:
+                seen[key] = (entry, len(seen))
+    if not seen:
+        return ""
+    ordered = sorted(seen.values(), key=lambda pair: (_entry_time(pair[0]), pair[1]))
+    return "\n\n".join(entry for entry, _position in ordered) + "\n"
+
+
 def _auto_sync_to_github(filepath: Path):
     """Auto-commit and push the log file to the private GitHub repo via GitHub REST API."""
     if not _AUTO_SYNC_ENABLED:
@@ -206,10 +254,10 @@ def _auto_sync_to_github(filepath: Path):
                     pass
                 return
 
-            content_b64 = base64.b64encode(content_bytes).decode("utf-8")
-
-            # Check if file exists on GitHub to obtain its sha for update
+            # Fetch the current remote file: we need its sha to update it AND its content so
+            # this upload can ADD to the day's archive instead of replacing it.
             sha = None
+            remote_text = ""
             req_get = urllib.request.Request(
                 api_url,
                 headers={"Authorization": f"Bearer {token}", "User-Agent": "TessentMentorAI"}
@@ -218,14 +266,48 @@ def _auto_sync_to_github(filepath: Path):
                 with urllib.request.urlopen(req_get, timeout=10) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                     sha = data.get("sha")
+                    if data.get("encoding") == "base64" and data.get("content"):
+                        remote_text = base64.b64decode(data["content"]).decode(
+                            "utf-8", errors="replace")
             except urllib.error.HTTPError as e:
                 if e.code != 404:
                     print(f"[session_logger] GET {filename} error {e.code}: {e.reason}")
             except Exception:
                 pass
 
+            # Union of what is already on GitHub and what this container has logged. Entries
+            # from earlier containers are preserved instead of being overwritten.
+            merged_text = merge_log_texts(remote_text, decoded) or decoded
+            if remote_text and merged_text.strip() == remote_text.strip():
+                print(
+                    f"[session_logger] {filename}: GitHub already holds every entry "
+                    f"({len(split_entries(remote_text))}); nothing to upload."
+                )
+                return
+
+            leaks = find_sensitive_leaks(merged_text)
+            if leaks:
+                print(
+                    "[session_logger] Upload blocked by the content-sensitivity guard "
+                    f"({len(leaks)} finding(s)); the local log is unchanged. "
+                    f"First finding: {leaks[0]}"
+                )
+                try:
+                    import streamlit as st
+
+                    st.warning(
+                        "⚠️ Session-log upload paused: the log contains data classified as "
+                        "content-sensitive (file names, absolute paths or extracted text). "
+                        "Local logging continues."
+                    )
+                except Exception:
+                    pass
+                return
+
+            content_b64 = base64.b64encode(merged_text.encode("utf-8")).decode("utf-8")
             payload = {
-                "message": f"auto-sync: {filename} @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                "message": (f"auto-sync: {filename} @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            f" ({len(split_entries(merged_text))} entries)"),
                 "content": content_b64,
                 "branch": _AUTO_SYNC_BRANCH
             }
@@ -243,7 +325,10 @@ def _auto_sync_to_github(filepath: Path):
                 method="PUT"
             )
             with urllib.request.urlopen(req_put, timeout=15) as resp:
-                print(f"[session_logger] Auto-synced {filename} to GitHub successfully!")
+                print(
+                    f"[session_logger] Auto-synced {filename} to GitHub successfully! "
+                    f"({len(split_entries(merged_text))} entries, merged with the remote copy)"
+                )
 
         except urllib.error.HTTPError as e:
             if e.code == 403:

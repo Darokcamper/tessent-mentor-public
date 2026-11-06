@@ -1970,7 +1970,7 @@ elif mode == "🧾 PPT Explainer":
     import hashlib
 
     from core.ppt_explainer import (PptExplainerError, estimate_deck_usage, explain_deck,
-                                    explain_slide, extract_deck)
+                                    explain_slide, extract_deck, parse_slide_selection)
 
     try:
         from core.session_logger import log_ppt_explainer
@@ -2082,6 +2082,34 @@ elif mode == "🧾 PPT Explainer":
         st.caption(f"- {_slide.display_label()} — {_status}")
 
 
+    # ── Slide selection: whole deck, or a custom set such as "1-5, 8, 12" ─────────
+    _slide_spec = st.text_input(
+        "Slides to explain",
+        value="",
+        key=f"ppt_slide_spec_{_digest}",
+        placeholder="blank = whole deck, or e.g. 1-5, 8, 12",
+        help=(
+            "Leave blank (or type 'all') for the whole deck. Otherwise give slide numbers "
+            "and/or ranges separated by commas."
+        ),
+    )
+    _selection_error = None
+    _selected_numbers = list(range(1, _deck.slide_count + 1))
+    try:
+        _selected_numbers = parse_slide_selection(_slide_spec, _deck.slide_count)
+    except PptExplainerError as _sel_error:
+        _selection_error = str(_sel_error)
+        _selected_numbers = []
+    _is_subset = bool(_slide_spec.strip()) and _slide_spec.strip().lower() not in {
+        "all", "*", "every", "whole",
+    }
+    if _selection_error:
+        st.error(_selection_error)
+    elif _is_subset and _selected_numbers:
+        _preview = ", ".join(str(number) for number in _selected_numbers[:12])
+        _more = "" if len(_selected_numbers) <= 12 else f" ... (+{len(_selected_numbers) - 12} more)"
+        st.caption(f"{len(_selected_numbers)} slide(s) selected: {_preview}{_more}")
+
     _labels = {slide.number: slide.display_label() for slide in _deck.slides}
     _nav_col1, _nav_col2, _nav_col3 = st.columns([2, 1, 1])
     with _nav_col1:
@@ -2160,6 +2188,32 @@ elif mode == "🧾 PPT Explainer":
         elif _coverage == "no_evidence":
             st.caption("No knowledge-base citations: the sources do not cover this slide.")
 
+        _sources = _result.get("sources") or []
+        if _sources:
+            _manual_sources = [s for s in _sources if s.get("kind") == "manual"]
+            _visual_sources = [s for s in _sources if s.get("kind") == "visual"]
+            with st.expander(
+                f"Where this explanation comes from — {len(_manual_sources)} manual page(s)", 
+                expanded=False,
+            ):
+                for _source in _sources:
+                    if _source.get("kind") == "manual":
+                        st.markdown(f"- **[Manual]** {_source['label']}")
+                    elif _source.get("kind") == "visual":
+                        st.markdown(f"- **[Slide picture, unverified]** {_source['label']}")
+                    else:
+                        st.markdown(f"- **[Slide]** {_source['label']}")
+                if _result.get("picture_terms_used"):
+                    st.caption(
+                        "This slide had little or no text, so its picture descriptions were "
+                        "used to search the manuals — that is why manual pages were found."
+                    )
+                if _visual_sources:
+                    st.caption(
+                        "Picture descriptions carry no page number and are not manual "
+                        "evidence; only the [Manual] entries above support technical claims."
+                    )
+
         _images = _result.get("images") or {}
         if _images.get("observations"):
             with st.expander(
@@ -2185,8 +2239,11 @@ elif mode == "🧾 PPT Explainer":
         _explain_one = st.button("🔍 Explain this slide", key=f"ppt_explain_one_{_digest}",
                                  use_container_width=True)
     with _run_col2:
-        _explain_all = st.button("📚 Explain the whole deck", key=f"ppt_explain_all_{_digest}",
-                                 use_container_width=True)
+        _deck_button_label = (f"📚 Explain {len(_selected_numbers)} selected slide(s)"
+                              if _is_subset else "📚 Explain the whole deck")
+        _explain_all = st.button(_deck_button_label, key=f"ppt_explain_all_{_digest}",
+                                 use_container_width=True,
+                                 disabled=_selection_error is not None)
 
     if _explain_one:
         if not ensure_llm_access():
@@ -2210,23 +2267,34 @@ elif mode == "🧾 PPT Explainer":
             _progress.progress(done / max(1, total))
             _status.text(f"Explained {done}/{total} slide(s)...")
 
-        with st.spinner("Explaining every slide in order... this can take a while for a long deck."):
+        with st.spinner("Explaining the selected slides in order... this can take a while."):
             _deck_result = explain_deck(_deck, interpret_images=_interpret_images,
-                                        on_progress=_on_progress)
+                                        on_progress=_on_progress,
+                                        slides=_selected_numbers if _is_subset else None)
         for _item in _deck_result["slides"]:
             _explain_cache[(_digest, _item["slide_number"])] = _item
         st.session_state[f"ppt_deck_result_{_digest}"] = _deck_result
-        log_ppt_explainer(_deck.slide_count, _deck_result["explained_count"], "whole_deck")
+        log_ppt_explainer(_deck.slide_count, _deck_result["explained_count"],
+                          "subset" if _is_subset else "whole_deck")
         _progress.progress(1.0)
         _status.text("Deck explained.")
 
     _deck_result = st.session_state.get(f"ppt_deck_result_{_digest}")
     if _deck_result:
         st.markdown("---")
-        st.markdown("### 📚 Whole-deck explanation")
-        st.caption(
-            f"{_deck_result['explained_count']} of {_deck_result['slide_count']} slide(s) explained."
-        )
+        _subset = bool(_deck_result.get("selected_slides")) and (
+            _deck_result.get("explained_slides") != _deck_result.get("slide_count"))
+        st.markdown("### 📚 Slide explanation" + (" (custom set)" if _subset else " (whole deck)"))
+        if _subset:
+            _chosen = ", ".join(str(number) for number in _deck_result["selected_slides"][:20])
+            st.caption(
+                f"{_deck_result['explained_count']} of {_deck_result['explained_slides']} "
+                f"selected slide(s) explained. Selected: {_chosen}"
+            )
+        else:
+            st.caption(
+                f"{_deck_result['explained_count']} of {_deck_result['slide_count']} slide(s) explained."
+            )
         if _deck_result.get("synthesis"):
             with st.expander("🧭 Presentation-level synthesis", expanded=True):
                 st.markdown(_deck_result["synthesis"])
