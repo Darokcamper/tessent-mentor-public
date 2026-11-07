@@ -678,6 +678,102 @@ def log_lab_explainer_error(module: str, script: str, error: str) -> None:
     ])
 
 
+def log_command_explorer(query: str, module: str = "ALL", mode: str = "ALL",
+                         flow_step: str = "ALL", result_count: int = 0,
+                         include_unverified: bool = False,
+                         commands: str = "") -> None:
+    """Logs one Commands Explorer search.
+
+    The Explorer is deterministic (no model call) but it is still something the user asked,
+    so it belongs in the session log: the query, the filters actually applied and what came
+    back. ``commands`` lists the names returned, capped by the caller.
+    """
+    _write_block("COMMANDS EXPLORER", [
+        ("QUERY", query or "(browse all)"),
+        ("FILTERS", f"module={module} | mode={mode} | flow_step={flow_step}"
+                    f" | include_unverified={bool(include_unverified)}"),
+        ("RESULTS", str(int(result_count))),
+        ("COMMANDS", commands or "(none)"),
+    ])
+
+
+def log_command_bulk_explain(query: str, matched: int, explained: int,
+                             undocumented: int) -> None:
+    """Logs a bulk command explanation run from the Explainer."""
+    _write_block("COMMANDS EXPLORER / BULK EXPLAIN", [
+        ("QUERY", query or "(browse all)"),
+        ("MATCHED", str(int(matched))),
+        ("EXPLAINED", str(int(explained))),
+        ("INCOMPLETE DOCUMENTATION", str(int(undocumented))),
+    ])
+
+
+def log_upload(kind: str, name: str, detail: str = "", outcome: str = "ok") -> None:
+    """Logs an upload / indexing action from the Upload mode.
+
+    Manuals and lab documents are the user's own knowledge material and their names are
+    useful for auditing what was indexed. Presentation content stays out of the log (see
+    ``log_qa``'s ``content_sensitive`` policy); callers pass a content-free ``detail``.
+    """
+    fields = [
+        ("KIND", str(kind)),
+        ("NAME", str(name)),
+        ("OUTCOME", str(outcome)),
+    ]
+    if detail:
+        fields.append(("DETAIL", str(detail)))
+    _write_block("UPLOAD & INDEX", fields)
+
+
+def log_batch_export(kind: str, scope: str, count: int, detail: str = "") -> None:
+    """Logs a batch/canonical export action."""
+    fields = [
+        ("EXPORT", str(kind)),
+        ("SCOPE", str(scope)),
+        ("ITEMS", str(int(count))),
+    ]
+    if detail:
+        fields.append(("DETAIL", str(detail)))
+    _write_block("BATCH EXPORT", fields)
+
+
+def log_ppt_assessment(slide_count: int, assessed: int, quiz_questions: int,
+                       coverage: str = "", gaps: int = 0) -> None:
+    """Content-free record of a PPT assessment run (same policy as the explainer)."""
+    _write_block("PPT ASSESSMENT", [
+        ("SLIDES", str(int(slide_count))),
+        ("ASSESSED", str(int(assessed))),
+        ("QUIZ QUESTIONS", str(int(quiz_questions))),
+        ("GAPS", str(int(gaps))),
+        ("COVERAGE", coverage or "(not recorded)"),
+    ], notify_webhook=False)
+
+
+def log_mode_error(mode: str, action: str, error: str) -> None:
+    """Logs a failure in any mode, so a silent UI error still leaves a trace."""
+    _write_block(f"{str(mode).upper()} / ERROR", [
+        ("ACTION", str(action)),
+        ("ERROR", str(error)),
+    ])
+
+
+def log_interaction(mode: str, action: str, prompt: str = "", result: str = "",
+                    detail: str = "") -> None:
+    """Generic record for any mode that has no dedicated helper.
+
+    Used so a new screen can never be silently unlogged: pass the mode name, what the user
+    asked and a short result. Long results are truncated rather than dropped.
+    """
+    fields = [("ACTION", str(action))]
+    if prompt:
+        fields.append(("PROMPT", str(prompt)[:2000]))
+    if result:
+        fields.append(("RESULT", str(result)[:4000]))
+    if detail:
+        fields.append(("DETAIL", str(detail)[:1000]))
+    _write_block(str(mode).upper(), fields)
+
+
 def log_question_bank(module: str, num_questions: int, q_bank: str) -> None:
     """Logs a generated assessment/viva question bank."""
     _write_block("ASSESSMENT QUESTION BANK", [

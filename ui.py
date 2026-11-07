@@ -427,6 +427,13 @@ if mode == "📤 Upload Manuals & Labs":
             with st.spinner("Saving PDF, extracting text pages, and updating vector index..."):
                 res = upload_and_index_pdf(uploaded_file.getvalue(), uploaded_file.name, topic_choice)
                 st.success(res)
+            try:
+                from core.session_logger import log_upload
+
+                log_upload("manual pdf", uploaded_file.name,
+                            detail=f"{uploaded_file.size / (1024 * 1024):.2f} MB | topic={topic_choice}")
+            except Exception:
+                pass
 
     st.markdown("---")
     st.markdown("### 📁 Manual Directory Upload Guide")
@@ -788,6 +795,26 @@ elif mode == "🔍 Commands Explorer (Siemens DFT)":
         include_unverified=inc_unverified,
     )
 
+    # Every mode is logged, not just Ask Question. The Explorer is deterministic but it is
+    # still a query the user asked, so one entry per distinct (query, filters) combination;
+    # the dedupe key stops a widget rerun from writing the same search twice.
+    try:
+        _explorer_key = (search_query, sel_module, sel_mode, sel_flow, bool(inc_unverified),
+                         len(results))
+        if st.session_state.get("cmd_explorer_logged") != _explorer_key:
+            from core.session_logger import log_command_explorer
+
+            log_command_explorer(
+                query=search_query, module=sel_module, mode=sel_mode, flow_step=sel_flow,
+                result_count=len(results), include_unverified=bool(inc_unverified),
+                commands=", ".join(
+                    str(entry.get("name") or entry.get("command") or "")
+                    for entry in results[:15] if isinstance(entry, dict)),
+            )
+            st.session_state["cmd_explorer_logged"] = _explorer_key
+    except Exception:
+        pass
+
     st.caption(f"Showing **{len(results)}** command(s)")
 
     # WP-3: explain every match in one pass. Deterministic and source-grounded (index fields
@@ -813,8 +840,22 @@ elif mode == "🔍 Commands Explorer (Siemens DFT)":
                 st.session_state["cmd_bulk_markdown"] = _md
                 st.session_state["cmd_bulk_summary"] = (
                     _bulk["matched"], _bulk["explained"], len(_bulk["undocumented"]))
+                try:
+                    from core.session_logger import log_command_bulk_explain
+
+                    log_command_bulk_explain(search_query or "(browse all)", _bulk["matched"],
+                              _bulk["explained"], len(_bulk["undocumented"]))
+                except Exception:
+                    pass
             except Exception as _bulk_error:
                 st.error(f"Bulk explanation failed: {type(_bulk_error).__name__}")
+                try:
+                    from core.session_logger import log_mode_error
+
+                    log_mode_error("Commands Explorer", "bulk explain",
+                                    type(_bulk_error).__name__)
+                except Exception:
+                    pass
         if st.session_state.get("cmd_bulk_markdown"):
             _matched, _explained, _undocumented = st.session_state.get(
                 "cmd_bulk_summary", (0, 0, 0))
@@ -1881,6 +1922,14 @@ elif mode == "📦 Batch Export (All Reports)":
                 selected_keys=_selected_keys,
             )
             st.session_state["canonical_export_result"] = _canonical_result
+            try:
+                from core.session_logger import log_batch_export
+
+                log_batch_export("canonical Markdown", f"{_scope_module} / {_scope_kind}",
+                            int(_canonical_result.summary.get("selected", 0)),
+                            detail=f"{len(_selected_keys)} key(s) requested")
+            except Exception:
+                pass
         _canonical_result = st.session_state.get("canonical_export_result")
         if _canonical_result:
             st.json(_canonical_result.summary)
@@ -1960,6 +2009,13 @@ elif mode == "📦 Batch Export (All Reports)":
                 if not _module_allowed(lab, lab):
                     continue
                 items.append(("lab", lab, None))
+        try:
+            from core.session_logger import log_batch_export
+
+            log_batch_export("deep study reports", str(export_type), len(items),
+                        detail=f"modules={len(_selected_ds_modules) or 'all'}")
+        except Exception:
+            pass
 
         if not items:
             st.warning("No items match the selected modules and scope.")
@@ -2524,9 +2580,30 @@ elif mode == "🧾 PPT Explainer":
                         )
                     _assess_progress.progress(1.0)
                     _assess_status.text("Assessment built.")
+                    try:
+                        from core.session_logger import log_ppt_assessment
+
+                        _assess_coverage_now = (st.session_state.get(f"ppt_assess_{_digest}")
+                                                or {}).get("coverage") or {}
+                        log_ppt_assessment(
+                            _deck.slide_count,
+                            int(_assess_coverage_now.get("assessed", 0)),
+                            int(_assess_quiz_count),
+                            coverage=str(_assess_coverage_now.get("statement", "")),
+                            gaps=len(_assess_coverage_now.get("slides_with_gaps") or []),
+                        )
+                    except Exception:
+                        pass
                 except Exception as _assess_error:
                     st.error(f"Assessment failed ({type(_assess_error).__name__}). The "
                              "per-slide explanations above are unaffected.")
+                    try:
+                        from core.session_logger import log_mode_error
+
+                        log_mode_error("PPT Assessment", "assess deck",
+                                        type(_assess_error).__name__)
+                    except Exception:
+                        pass
 
         _assess_result = st.session_state.get(f"ppt_assess_{_digest}")
         if _assess_result:
