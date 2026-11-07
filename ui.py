@@ -293,6 +293,17 @@ with st.sidebar:
     st.markdown("### 📝 Session Logging")
     st.caption("✅ Active — everything you ask & every answer is saved.")
     st.caption(f"Folder: `{LOG_DIR}`")
+    # Which daily file is being written, and on whose clock. A container runs in UTC, so
+    # without this the previous day's file looks like it is still being written.
+    try:
+        from core.session_logger import log_clock_info
+        _clock = log_clock_info()
+        st.caption(
+            f"Writing to `{_clock['active_file']}` · clock {_clock['now']} "
+            f"({_clock['timezone']})"
+        )
+    except Exception:
+        pass
     
     # Show sync status
     token = _get_github_token()

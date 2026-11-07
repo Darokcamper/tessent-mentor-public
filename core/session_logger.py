@@ -25,6 +25,65 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "session_logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+# ── Log clock / day boundary ───────────────────────────────────────────────────
+# Streamlit Cloud containers run in UTC. A UTC-based daily file therefore rolled over at
+# 05:30 IST, so the previous day's file kept growing for the first five and a half hours of
+# the local day ("yesterday's log is being edited today"), and the timestamps written into
+# the entries did not match the owner's clock.
+#
+# SESSION_LOG_TZ (env var or Streamlit secret, e.g. "Asia/Kolkata") now decides both the
+# file date and the timestamps. Default is Asia/Kolkata; an unknown value falls back to the
+# system clock rather than crashing.
+DEFAULT_LOG_TZ = "Asia/Kolkata"
+_LOG_TZ_REPORTED = None
+
+
+def _log_tz_name() -> str:
+    name = os.getenv("SESSION_LOG_TZ", "").strip()
+    if name:
+        return name
+    try:
+        import streamlit as st
+
+        value = st.secrets.get("SESSION_LOG_TZ", "")
+        if value:
+            return str(value).strip()
+    except Exception:
+        pass
+    return DEFAULT_LOG_TZ
+
+
+def _log_tz():
+    """Resolved tzinfo, or None when the name is unknown (caller uses system time)."""
+    global _LOG_TZ_REPORTED
+    name = _log_tz_name()
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(name)
+        _LOG_TZ_REPORTED = name
+        return tz
+    except Exception:
+        _LOG_TZ_REPORTED = None
+        return None
+
+
+def _now() -> datetime:
+    """Current time in the configured log timezone (system time if it cannot be resolved)."""
+    tz = _log_tz()
+    return datetime.now(tz) if tz is not None else datetime.now()
+
+
+def log_clock_info() -> dict:
+    """What the log clock is doing, for display in the sidebar."""
+    tz = _log_tz()
+    now = _now()
+    return {
+        "timezone": _LOG_TZ_REPORTED or "system",
+        "now": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "active_file": f"{now.strftime('%Y-%m-%d')}.log",
+    }
+
 # Keep a file handle cache so we don't reopen constantly.
 _handles = {}
 
@@ -218,7 +277,7 @@ def _record_sync(status: str, *, entries: int = None, detail: str = "", filename
     global _last_sync
     _last_sync = {
         "status": status,                 # synced | up_to_date | blocked | error | disabled
-        "at": datetime.now().strftime("%H:%M:%S"),
+        "at": _now().strftime("%H:%M:%S"),
         "entries": entries,
         "detail": detail,
         "filename": filename,
@@ -339,7 +398,7 @@ def _auto_sync_to_github(filepath: Path):
 
             content_b64 = base64.b64encode(merged_text.encode("utf-8")).decode("utf-8")
             payload = {
-                "message": (f"auto-sync: {filename} @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                "message": (f"auto-sync: {filename} @ {_now().strftime('%Y-%m-%d %H:%M:%S')}"
                             f" ({len(split_entries(merged_text))} entries)"),
                 "content": content_b64,
                 "branch": _AUTO_SYNC_BRANCH
@@ -440,7 +499,7 @@ def save_attachment(bytes_or_path: bytes, filename: str, source_folder: Path = A
         return ""
 
     safe_name = Path(filename).name
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = _now().strftime("%Y%m%d_%H%M%S")
     token = os.urandom(4).hex()
     stored_name = f"{stamp}_{token}_{safe_name}"
     stored_path = source_folder / stored_name
@@ -456,7 +515,7 @@ def save_attachment(bytes_or_path: bytes, filename: str, source_folder: Path = A
 
 
 def _today_path() -> Path:
-    return LOG_DIR / f"{datetime.now().strftime('%Y-%m-%d')}.log"
+    return LOG_DIR / f"{_now().strftime('%Y-%m-%d')}.log"
 
 
 def _get_handle() -> object:
@@ -478,7 +537,7 @@ def _write_block(section: str, field_lines: list, notify_webhook: bool = True) -
     ``notify_webhook=False`` suppresses the instant-notification copy of the entry; a
     content-sensitive interaction must not be mirrored to another destination either.
     """
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = _now().strftime("%Y-%m-%d %H:%M:%S")
     user = "user"
     try:
         from core.auth import current_user
