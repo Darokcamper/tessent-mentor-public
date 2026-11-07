@@ -298,6 +298,31 @@ with st.sidebar:
     token = _get_github_token()
     if _AUTO_SYNC_ENABLED and token:
         st.caption("🔄 **Auto-sync: ON** — logs sync to GitHub after each question")
+        # Last attempt, so the owner can see the result in the app instead of hunting
+        # through the Cloud log or GitHub.
+        try:
+            from core.session_logger import last_sync_status
+            _sync = last_sync_status()
+        except Exception:
+            _sync = {}
+        if _sync.get("status"):
+            _status = _sync["status"]
+            _entries = _sync.get("entries")
+            _count = f" · {_entries} entries" if _entries is not None else ""
+            _at = _sync.get("at") or ""
+            if _status == "synced":
+                st.caption(f"✅ **Last sync: {_at}**{_count} (merged with the remote copy)")
+            elif _status == "up_to_date":
+                st.caption(f"✅ **Last sync: {_at}**{_count} — remote already had every entry")
+            elif _status == "blocked":
+                st.caption(f"⛔ **Last sync: {_at}** — blocked by the content-sensitivity guard")
+                st.caption(f"   _{_sync.get('detail', '')}_")
+            elif _status == "error":
+                st.caption(f"⚠️ **Last sync: {_at}** failed — {_sync.get('detail', '')}")
+            else:
+                st.caption(f"⏸️ **Auto-sync idle** — {_sync.get('detail', '')}")
+        else:
+            st.caption("_No sync attempt yet in this process — ask a question to start._")
     elif _AUTO_SYNC_ENABLED:
         st.caption("⚠️ **Auto-sync: OFF** — set GITHUB_TOKEN secret to enable")
     

@@ -208,13 +208,37 @@ def merge_log_texts(*texts: str) -> str:
     return "\n\n".join(entry for entry, _position in ordered) + "\n"
 
 
+# ── Last-sync visibility (so the owner can see it in the app, not just in GitHub) ──
+# One dict, replaced atomically on every attempt. Read through last_sync_status().
+_last_sync: dict = {}
+
+
+def _record_sync(status: str, *, entries: int = None, detail: str = "", filename: str = "") -> None:
+    """Remember the outcome of the most recent upload attempt for the sidebar panel."""
+    global _last_sync
+    _last_sync = {
+        "status": status,                 # synced | up_to_date | blocked | error | disabled
+        "at": datetime.now().strftime("%H:%M:%S"),
+        "entries": entries,
+        "detail": detail,
+        "filename": filename,
+    }
+
+
+def last_sync_status() -> dict:
+    """Copy of the last upload outcome: status, time, entry count and a short detail."""
+    return dict(_last_sync)
+
+
 def _auto_sync_to_github(filepath: Path):
     """Auto-commit and push the log file to the private GitHub repo via GitHub REST API."""
     if not _AUTO_SYNC_ENABLED:
+        _record_sync("disabled", detail="auto-sync is switched off")
         return
 
     token = _get_github_token()
     if not token:
+        _record_sync("disabled", detail="no GITHUB_TOKEN configured")
         return
 
     def _sync():
@@ -237,6 +261,9 @@ def _auto_sync_to_github(filepath: Path):
                 decoded = ""
             leaks = find_sensitive_leaks(decoded)
             if leaks:
+                _record_sync("blocked", entries=len(split_entries(decoded)),
+                             filename=filepath.name,
+                             detail=f"content-sensitivity guard: {leaks[0][:80]}")
                 print(
                     "[session_logger] Upload blocked by the content-sensitivity guard "
                     f"({len(leaks)} finding(s)); the local log is unchanged. "
@@ -279,14 +306,20 @@ def _auto_sync_to_github(filepath: Path):
             # from earlier containers are preserved instead of being overwritten.
             merged_text = merge_log_texts(remote_text, decoded) or decoded
             if remote_text and merged_text.strip() == remote_text.strip():
+                _log_entries = len(split_entries(remote_text))
                 print(
                     f"[session_logger] {filename}: GitHub already holds every entry "
-                    f"({len(split_entries(remote_text))}); nothing to upload."
+                    f"({_log_entries}); nothing to upload."
                 )
+                _record_sync("up_to_date", entries=_log_entries, filename=filename,
+                             detail="remote already has every entry")
                 return
 
             leaks = find_sensitive_leaks(merged_text)
             if leaks:
+                _record_sync("blocked", entries=len(split_entries(merged_text)),
+                             filename=filename,
+                             detail=f"content-sensitivity guard: {leaks[0][:80]}")
                 print(
                     "[session_logger] Upload blocked by the content-sensitivity guard "
                     f"({len(leaks)} finding(s)); the local log is unchanged. "
@@ -325,17 +358,27 @@ def _auto_sync_to_github(filepath: Path):
                 method="PUT"
             )
             with urllib.request.urlopen(req_put, timeout=15) as resp:
+                _count = len(split_entries(merged_text))
                 print(
                     f"[session_logger] Auto-synced {filename} to GitHub successfully! "
-                    f"({len(split_entries(merged_text))} entries, merged with the remote copy)"
+                    f"({_count} entries, merged with the remote copy)"
                 )
+                _record_sync("synced", entries=_count, filename=filename,
+                             detail="merged with the remote copy")
 
         except urllib.error.HTTPError as e:
+            _record_sync("error", filename=filepath.name,
+                         detail=f"HTTP {e.code}" + (
+                             " - token needs Contents: Read and write"
+                             if e.code == 403 else
+                             " - another upload changed the file first" if e.code == 409 else ""))
             if e.code == 403:
                 print(f"[session_logger] Auto-sync 403: Token needs 'Contents: Read and write' on Darokcamper/tessent_ai to push logs.")
             else:
                 print(f"[session_logger] Auto-sync HTTP error {e.code}: {e.reason}")
         except Exception as e:
+            _record_sync("error", filename=filepath.name,
+                         detail=f"{type(e).__name__}: {str(e)[:80]}")
             print(f"[session_logger] Auto-sync error: {e}")
 
     # Run in background thread to not block the UI
