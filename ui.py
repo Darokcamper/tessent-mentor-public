@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import inspect
 import uuid
 from pathlib import Path
 import streamlit as st
@@ -2073,9 +2074,37 @@ elif mode == "🧾 PPT Explainer":
         _ASSESS_AVAILABLE = False
 
     try:
-        from core.session_logger import log_ppt_explainer
+        from core.session_logger import log_ppt_explainer as _log_ppt_explainer_raw
     except Exception:  # pragma: no cover - logging must never break the UI
-        def log_ppt_explainer(*args, **kwargs):
+        _log_ppt_explainer_raw = None
+
+    def log_ppt_explainer(*args, **kwargs):
+        """Log the run without ever costing the user their explanation.
+
+        A redeploy can leave an older ``core.session_logger`` in ``sys.modules``
+        for the rest of a live session. That copy's ``log_ppt_explainer`` predates
+        the deck-content keywords, so the call raised ``TypeError: unexpected
+        keyword argument 'file_name'`` on the public deployment (2026-11-07) and
+        the whole page died with it. Logging is observability, not the product:
+        drop the keywords a stale signature cannot take, and swallow anything the
+        logger still throws.
+        """
+        if _log_ppt_explainer_raw is None:
+            return None
+        try:
+            return _log_ppt_explainer_raw(*args, **kwargs)
+        except TypeError:
+            pass
+        except Exception:  # pragma: no cover - never let logging break the page
+            return None
+        try:
+            accepted = inspect.signature(_log_ppt_explainer_raw).parameters
+            if any(param.kind is inspect.Parameter.VAR_KEYWORD
+                   for param in accepted.values()):
+                return None
+            return _log_ppt_explainer_raw(
+                *args, **{key: value for key, value in kwargs.items() if key in accepted})
+        except Exception:  # pragma: no cover - never let logging break the page
             return None
 
     st.header("🧾 PPT Explainer")
