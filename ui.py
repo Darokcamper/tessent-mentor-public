@@ -2263,28 +2263,48 @@ elif mode == "🧾 PPT Explainer":
 
         _sources = _result.get("sources") or []
         if _sources:
+            _kinds_summary = _result.get("source_kinds") or {}
+            if _kinds_summary.get("line"):
+                st.caption(f"🧩 Sources combined — {_kinds_summary['line']}")
             _manual_sources = [s for s in _sources if s.get("kind") == "manual"]
             _visual_sources = [s for s in _sources if s.get("kind") == "visual"]
+            _kind_names = {
+                "manual": "Manual",
+                "video_slide": "Video slide (frame on screen)",
+                "video_transcript": "Video transcript (spoken)",
+                "lab_workbook": "Lab workbook",
+                "course_exam": "Course exam",
+                "reference": "Knowledge base",
+            }
             with st.expander(
-                f"Where this explanation comes from — {len(_manual_sources)} manual page(s)", 
+                f"Where this explanation comes from — {len(_manual_sources)} manual page(s)"
+                + (f", {len(_kinds_summary.get('kinds') or [])} kind(s) of source"
+                   if _kinds_summary.get("kinds") else ""),
                 expanded=False,
             ):
                 for _source in _sources:
-                    if _source.get("kind") == "manual":
-                        st.markdown(f"- **[Manual]** {_source['label']}")
-                    elif _source.get("kind") == "visual":
-                        st.markdown(f"- **[Slide picture, unverified]** {_source['label']}")
-                    else:
+                    _kind = _source.get("source_kind") or _source.get("kind") or "reference"
+                    if _source.get("kind") == "visual":
+                        st.markdown(f"- **[Deck picture, unverified]** {_source['label']}")
+                    elif _source.get("kind") == "slide":
                         st.markdown(f"- **[Slide]** {_source['label']}")
+                    else:
+                        _origin = (" (linked to this slide)" if _source.get("origin")
+                                   in {"correlated", "deck_picture"} else "")
+                        st.markdown(
+                            f"- **[{_kind_names.get(_kind, _kind)}]** {_source['label']}"
+                            + _origin
+                        )
                 if _result.get("picture_terms_used"):
                     st.caption(
                         "This slide had little or no text, so its picture descriptions were "
-                        "used to search the manuals — that is why manual pages were found."
+                        "used to search the knowledge base — that is why pages were found."
                     )
                 if _visual_sources:
                     st.caption(
-                        "Picture descriptions carry no page number and are not manual "
-                        "evidence; only the [Manual] entries above support technical claims."
+                        "Picture descriptions carry no page number and are not themselves "
+                        "evidence; where a picture is linked to a video-slide or transcript "
+                        "page, that page is what supports the claim."
                     )
 
         _images = _result.get("images") or {}
@@ -2297,6 +2317,11 @@ elif mode == "🧾 PPT Explainer":
                     _obs_head = f"figure {_obs.get('ordinal', '?')} of this slide"
                     if _obs.get("observed_title"):
                         _obs_head += f" — its own heading reads “{_obs['observed_title']}”"
+                    _linked = _obs.get("linked_pages") or []
+                    if _linked:
+                        _where = "; ".join(
+                            f"{item['source']} page {item['page']}" for item in _linked)
+                        _obs_head += f" · linked to {_where}"
                     st.markdown(f"- **{_obs_head}**: {_obs['description']}")
                 if _images.get("mismatched_titles"):
                     st.warning(

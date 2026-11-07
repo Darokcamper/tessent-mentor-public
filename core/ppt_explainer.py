@@ -23,6 +23,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from core.source_map import KIND_LABELS, kind_summary, source_kind, source_label, source_role
+
 SUPPORTED_SUFFIXES = (".pptx",)
 
 _MAX_SLIDE_CHARS = 6000
@@ -375,6 +377,24 @@ def observed_title(text: str) -> str:
     return ""
 
 
+def _link_picture(title: str, description: str, limit: int = 2) -> List[Dict[str, Any]]:
+    """Pages in the corpus that show or describe the same picture. Never raises.
+
+    A deck built from training videos holds the same frames the course slides hold, so the
+    picture's own heading usually appears in a video-slide page. Linking it means the frame
+    becomes citable evidence instead of an unverified description.
+    """
+    query = f"{title} {description}".strip()
+    if len(query) < 12:
+        return []
+    try:
+        from core.source_map import find_pages
+
+        return find_pages(query, kinds=("video_slide", "video_transcript"), limit=limit)
+    except Exception:
+        return []
+
+
 def _titles_differ(observed: str, slide_title: str) -> bool:
     """True when a picture's own heading is a different topic from the slide's title."""
     a = re.sub(r"[^a-z0-9 ]+", " ", str(observed or "").lower()).split()
@@ -442,6 +462,13 @@ def interpret_slide_images(
         }
         if title_in_picture:
             observation["differs_from_slide_title"] = _titles_differ(title_in_picture, slide.title)
+        # Correlate the picture with the knowledge base: the deck's frames are video frames,
+        # so the same subject usually exists as a citable page. Linking it turns "a model
+        # described this picture" into "this frame is page N of the course slides".
+        linked = _link_picture(title_in_picture or "", description)
+        if linked:
+            observation["linked_pages"] = linked
+            observation["corroborated"] = True
         result["observations"].append(observation)
     result["mismatched_titles"] = [
         item["observed_title"] for item in result["observations"]
@@ -467,17 +494,23 @@ def slide_sources(slide: Slide, evidence: List[Dict[str, Any]],
                   images: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Everything one slide explanation is built from, labelled by kind.
 
-    ``slide``  - the deck slide itself: the subject, never evidence of a Tessent fact
-    ``manual`` - knowledge-base chunks, each carrying a real file name and page number
-    ``visual`` - unverified descriptions of the slide's own pictures (no page number)
+    ``slide``  - the deck slide itself: the subject being explained
+    ``manual`` - a manual page: exact commands, options and definitions
+    ``video_slide`` / ``video_transcript`` - the course frame and the spoken explanation
+    ``lab_workbook`` / ``course_exam`` - the exercise and how it is graded
+    ``visual`` - unverified descriptions of the deck's own pictures
     """
     sources: List[Dict[str, Any]] = [{"kind": "slide", "label": f"Slide {slide.number} (this deck)"}]
     for item in evidence or []:
+        kind = item.get("kind") or source_kind(str(item.get("source") or ""))
         sources.append({
-            "kind": "manual",
+            "kind": "manual" if kind in {"manual", "reference"} else kind,
+            "source_kind": kind,
             "label": item.get("citation") or f"[Source: {item.get('source')}, Page {item.get('page')}]",
             "file": item.get("source"),
             "page": item.get("page"),
+            "origin": item.get("origin"),
+            "describes": item.get("label") or KIND_LABELS.get(kind, kind),
         })
     for item in ((images or {}).get("observations") or []):
         ordinal = item.get("ordinal") or 1
@@ -559,12 +592,17 @@ def _observations_block(images: Dict[str, Any]) -> Optional[str]:
 
 
 def gather_evidence(slide: Slide, retrieve_fn: Optional[Callable] = None, top_k: int = 6,
-                    extra_query: str = "") -> List[Dict[str, Any]]:
-    """Knowledge-base chunks that may support this slide. Never invents a citation.
+                    extra_query: str = "", correlate: bool = True) -> List[Dict[str, Any]]:
+    """Everything that may support this slide, from every kind of source.
 
     ``extra_query`` carries the vision descriptions of the slide's own pictures, so an
-    image-led slide (no extractable text) still searches the manuals for the concepts the
-    figure shows instead of returning nothing.
+    image-led slide (no extractable text) still searches the knowledge base instead of
+    returning nothing.
+
+    ``correlate`` adds the pages that treat the same subject in *other* kinds of source - the
+    video frame that showed it, the transcript that explained it, the manual page that states
+    the rule, the lab page that practises it - rather than trusting whichever chunk a single
+    similarity search happened to surface.
     """
     query = " ".join(part for part in (slide.retrieval_text().strip(),
                                       str(extra_query or "").strip()) if part).strip()
@@ -574,7 +612,7 @@ def gather_evidence(slide: Slide, retrieve_fn: Optional[Callable] = None, top_k:
     try:
         results = retrieve_fn(query, top_k=top_k) or []
     except Exception:
-        return []
+        results = []
 
     evidence = []
     for item in results:
@@ -590,9 +628,50 @@ def gather_evidence(slide: Slide, retrieve_fn: Optional[Callable] = None, top_k:
                 "text": text,
                 "citation": _citation(item),
                 "score": item.get("score"),
+                "kind": source_kind(str(source)),
+                "label": source_label(str(source)),
+                "role": source_role(str(source)),
+                "origin": "retrieval",
             }
         )
-    return evidence
+
+    if correlate:
+        evidence = _add_correlated_sources(evidence, query)
+    return _drop_duplicate_pages(evidence)
+
+
+def _add_correlated_sources(evidence: List[Dict[str, Any]], query: str,
+                            limit: int = 4) -> List[Dict[str, Any]]:
+    """Add pages from kinds the retrieval did not happen to return. Never raises."""
+    try:
+        from core.source_map import evidence_from_pages, find_pages, kind_summary
+
+        present = {item.get("kind") for item in evidence}
+        missing_kinds = {"manual", "video_slide", "video_transcript"} - present
+        if not missing_kinds:
+            return evidence
+        pages = find_pages(query, kinds=missing_kinds, limit=limit)
+        extra = evidence_from_pages(pages, origin="correlated")
+        if not extra:
+            return evidence
+        combined = evidence + extra
+        summary = kind_summary(combined)
+        return combined
+    except Exception:
+        return evidence
+
+
+def _drop_duplicate_pages(evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One entry per (source, page); a correlated page never repeats a retrieved one."""
+    seen = set()
+    out = []
+    for item in evidence:
+        key = (str(item.get("source")), item.get("page"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
 
 
 def _evidence_block(evidence: List[Dict[str, Any]]) -> str:
@@ -601,7 +680,10 @@ def _evidence_block(evidence: List[Dict[str, Any]]) -> str:
     parts = []
     used = 0
     for item in evidence:
-        chunk = f"Source Document: {item['source']} (Page {item['page']})\nContent: {item['text']}"
+        kind = item.get("kind") or "reference"
+        label = item.get("label") or KIND_LABELS.get(kind, kind)
+        chunk = (f"Source Document: {item['source']} (Page {item['page']}) [{label}]\n"
+                 f"Content: {item['text']}")
         if used + len(chunk) > _MAX_EVIDENCE_CHARS:
             break
         parts.append(chunk)
@@ -634,6 +716,24 @@ GROUNDING RULES (MANDATORY):
 8. Never quote a picture file name (for example image.png). If you refer to a figure, call it
    "the figure on this slide" or "the slide's figure".
 
+COMBINE EVERY KIND OF SOURCE (this is the point of the exercise):
+The reference context mixes several independent expressions of the same subject, each named
+in square brackets after its page:
+  [manual page]                    the exact command, option, argument or definition
+  [video slide (frame on screen)]  what the course actually showed on this topic
+  [video transcript (spoken)]      the trainer's spoken explanation and the reasoning behind it
+  [lab workbook page]              the exercise that practises it
+  [course exam page]               how the topic is examined, i.e. what is graded
+Never treat one kind as the only authority, and never call a kind unverified merely because it
+is not a manual. Write ONE consolidated explanation that:
+  * states the facts the manual page fixes exactly (commands, options, arguments);
+  * adds what the video frame shows and what the transcript says about it, in the trainer's
+    own terms, woven in rather than appended as a separate list;
+  * points out where the lab or the exam demonstrates the same thing;
+  * cites the page for every claim, and where two kinds make the same point in different
+    words, says it once instead of repeating it;
+  * flags any point where the kinds diverge, or where only one kind covers it.
+
 SLIDE CONTENT (slide {number} of {total}):
 {slide_body}
 
@@ -643,7 +743,10 @@ REFERENCE CONTEXT:
 Write the explanation with these headings:
 ### Slide {number}: <subject>
 **What this slide shows** - describe the slide content in context.
-**Technical explanation** - define the concepts, commands and flow position, with citations.
+**Consolidated explanation** - combine the manual, video slide, transcript, lab and exam
+evidence into one account, with a citation for every technical claim.
+**How the sources agree** - one short paragraph: what is corroborated across kinds, and what
+only one kind states.
 **Tessent flow position** - where this belongs in the scan/ATPG flow (state if the slide or
 the sources do not establish it).
 **Not covered by the knowledge base** - list anything you could not verify, or write "None".
@@ -696,6 +799,7 @@ def explain_slide(
     generate: bool = True,
     top_k: int = 6,
     verify_citations: bool = True,
+    correlate: bool = True,
 ) -> Dict[str, Any]:
     """Explain one slide (1-based *index*).
 
@@ -720,7 +824,7 @@ def explain_slide(
     # query, which is what makes a real manual citation possible instead of "not covered".
     picture_terms = visual_query(images)
     evidence = gather_evidence(slide, retrieve_fn=retrieve_fn, top_k=top_k,
-                               extra_query=picture_terms)
+                               extra_query=picture_terms, correlate=correlate)
     relevance = evidence_relevance(slide, evidence, extra_text=picture_terms)
 
     result: Dict[str, Any] = {
@@ -740,6 +844,7 @@ def explain_slide(
         "picture_terms_used": bool(picture_terms),
         "relevance": relevance,
         "coverage": relevance["label"],
+        "source_kinds": kind_summary(evidence),
         "explanation": None,
         "model_error": None,
         "citation_check": None,
@@ -884,6 +989,7 @@ def explain_deck(
     top_k: int = 6,
     on_progress: Optional[Callable[[int, int], None]] = None,
     slides: Optional[Iterable[int]] = None,
+    correlate: bool = True,
 ) -> Dict[str, Any]:
     """Explain the selected slides in order, then synthesise. Never skips a slide silently.
 
@@ -916,6 +1022,7 @@ def explain_deck(
                 interpret_images=interpret_images,
                 generate=generate,
                 top_k=top_k,
+                correlate=correlate,
             )
         )
         if on_progress is not None:
