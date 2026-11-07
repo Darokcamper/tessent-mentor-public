@@ -123,7 +123,14 @@ _LEAK_PATTERNS = (
     ("absolute_windows_path", re.compile(r"[A-Za-z]:[\\/][^\s\"'<>|]+")),
     ("absolute_posix_path", re.compile(r"(?<![\w.])/(?:Users|home|mnt|var|tmp)/[^\s\"'<>|]+")),
     ("attachment_store_path", re.compile(r"attachments[\\/][0-9]{8}_[0-9a-f]{6,}_")),
-    ("slide_file_reference", re.compile(r"[\w .\-]{1,120}\.(?:pptx|ppt|potx)(?![a-z0-9])", re.IGNORECASE)),
+)
+
+# A presentation file name in the log is only a leak while deck content logging is off
+# (the pre-2026-11-07 policy). Once the owner enabled content logging the deck name is
+# expected, and blocking it would silently stop the whole daily log from being uploaded.
+_PPT_REFERENCE_PATTERN = (
+    "slide_file_reference",
+    re.compile(r"[\w .\-]{1,120}\.(?:pptx|ppt|potx)(?![a-z0-9])", re.IGNORECASE),
 )
 
 
@@ -138,7 +145,11 @@ def find_sensitive_leaks(text: str) -> list:
         return []
 
     findings = []
-    for label, pattern in _LEAK_PATTERNS:
+    patterns = list(_LEAK_PATTERNS)
+    if not _ppt_content_logging_enabled():
+        # Old policy: a deck name in the log means content leaked into it.
+        patterns.append(_PPT_REFERENCE_PATTERN)
+    for label, pattern in patterns:
         for match in pattern.finditer(body):
             snippet = match.group(0)
             # The redaction marker itself is not a leak.
@@ -639,17 +650,51 @@ def log_qa(question: str, answer: str, attachment_name: str = None,
     _write_block("QA / ASK QUESTION", fields, notify_webhook=not content_sensitive)
 
 
-def log_ppt_explainer(slide_count: int, explained_count: int, outcome: str = "ok") -> None:
-    """Content-free record of a PPT Explainer run (WP-10 privacy policy).
+def _ppt_content_logging_enabled() -> bool:
+    """Whether deck content (file name, slide text, explanations) is written to the log.
 
-    Deliberately records counts and outcome only: no file name, no path, no slide text
-    and no model prompt. The webhook is not notified for this section.
+    Owner decision 2026-11-07 reverses the earlier counts-only rule: the decks are the owner's
+    own material in the owner's own private repository, and "everything asked" includes what
+    the deck said. ``SESSION_LOG_PPT_CONTENT=off`` (env var or Streamlit secret) restores the
+    counts-only behaviour without a code change.
     """
-    _write_block("PPT EXPLAINER", [
+    for read in (lambda: os.getenv("SESSION_LOG_PPT_CONTENT", ""),
+                 lambda: str(st.secrets.get("SESSION_LOG_PPT_CONTENT", ""))):
+        try:
+            raw = str(read() or "").strip().lower()
+        except Exception:
+            raw = ""
+        if raw in {"off", "0", "false", "no", "disabled"}:
+            return False
+        if raw in {"on", "1", "true", "yes", "enabled"}:
+            return True
+    return True          # default: content is logged
+
+
+def log_ppt_explainer(slide_count: int, explained_count: int, outcome: str = "ok",
+                      file_name: str = "", slides: str = "", detail: str = "") -> None:
+    """Record of a PPT Explainer run.
+
+    Records the counts always, and - unless ``SESSION_LOG_PPT_CONTENT`` disables it - the
+    deck's file name, the slide numbers asked for and the composed content block the caller
+    supplies (slide titles, extracted text and the explanations). The webhook is still not
+    notified for this section, so a deck never leaves through the instant-alert channel.
+    """
+    fields = [
         ("SLIDES", str(int(slide_count))),
         ("EXPLAINED", str(int(explained_count))),
         ("OUTCOME", str(outcome)),
-    ], notify_webhook=False)
+    ]
+    if _ppt_content_logging_enabled():
+        if file_name:
+            fields.append(("FILE", str(file_name)))
+        if slides:
+            fields.append(("SLIDES ASKED", str(slides)))
+        if detail:
+            fields.append(("CONTENT", str(detail)))
+    else:
+        fields.append(("CONTENT", "not logged (SESSION_LOG_PPT_CONTENT=off)"))
+    _write_block("PPT EXPLAINER", fields, notify_webhook=False)
 
 
 def log_qa_error(question: str, error: str) -> None:
@@ -738,15 +783,24 @@ def log_batch_export(kind: str, scope: str, count: int, detail: str = "") -> Non
 
 
 def log_ppt_assessment(slide_count: int, assessed: int, quiz_questions: int,
-                       coverage: str = "", gaps: int = 0) -> None:
-    """Content-free record of a PPT assessment run (same policy as the explainer)."""
-    _write_block("PPT ASSESSMENT", [
+                       coverage: str = "", gaps: int = 0, file_name: str = "",
+                       detail: str = "") -> None:
+    """Record of a PPT assessment run: counts always, content unless the switch is off."""
+    fields = [
         ("SLIDES", str(int(slide_count))),
         ("ASSESSED", str(int(assessed))),
         ("QUIZ QUESTIONS", str(int(quiz_questions))),
         ("GAPS", str(int(gaps))),
         ("COVERAGE", coverage or "(not recorded)"),
-    ], notify_webhook=False)
+    ]
+    if _ppt_content_logging_enabled():
+        if file_name:
+            fields.append(("FILE", str(file_name)))
+        if detail:
+            fields.append(("CONTENT", str(detail)))
+    else:
+        fields.append(("CONTENT", "not logged (SESSION_LOG_PPT_CONTENT=off)"))
+    _write_block("PPT ASSESSMENT", fields, notify_webhook=False)
 
 
 def log_mode_error(mode: str, action: str, error: str) -> None:

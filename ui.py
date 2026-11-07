@@ -183,9 +183,10 @@ with st.sidebar:
     # so users must be told. Rendered after require_auth(), i.e. only for signed-in
     # users, and it states what is deliberately NOT stored.
     st.caption(
-        "ℹ️ **Privacy:** your questions, answers and generated explanations are "
-        "recorded and stored in the site owner's private repository for review. "
-        "Uploaded presentation content, file names and exam-bank material are never logged."
+        "ℹ️ **Privacy:** your questions, answers, generated explanations **and the content "
+        "of uploaded presentations** (file name, slide text, explanations) are recorded and "
+        "stored in the site owner's private repository for review. Exam-bank material stays "
+        "redacted. The owner can switch deck logging off with `SESSION_LOG_PPT_CONTENT=off`."
     )
     st.title("🧠 Tessent Mentor AI")
     st.caption("Tessent & DFT Expert Assistant")
@@ -2080,8 +2081,10 @@ elif mode == "🧾 PPT Explainer":
     st.header("🧾 PPT Explainer")
     st.caption(
         "Upload a .pptx deck and get slide-by-slide technical explanations grounded in the "
-        "Tessent knowledge base. Uploaded presentations are processed locally and are never "
-        "written to the session log or its upload payload."
+        "Tessent knowledge base and its video slides, transcripts, manuals and labs. The deck "
+        "file itself is never saved, but the deck name, the slides you ask for and their "
+        "explanations are written to the session log for review "
+        "(owner switch: SESSION_LOG_PPT_CONTENT=off)."
     )
 
     _ppt_file = st.file_uploader(
@@ -2400,6 +2403,36 @@ elif mode == "🧾 PPT Explainer":
         elif _result.get("picture_count") and _images.get("available") is False:
             st.caption("Picture description was skipped for this slide.")
 
+    def _slide_log_block(item, text_limit: int = 2500, answer_limit: int = 6000) -> str:
+        """One slide's content for the session log: title, its text, the explanation."""
+        lines = [f"--- Slide {item.get('slide_number')} ---",
+                 f"TITLE: {item.get('title') or '(untitled)'}"]
+        slide_text = str(item.get("slide_text") or "").strip()
+        if slide_text:
+            lines.append("SLIDE TEXT:")
+            lines.append(slide_text[:text_limit])
+        if item.get("explanation"):
+            lines.append("EXPLANATION:")
+            lines.append(str(item["explanation"])[:answer_limit])
+        if item.get("citations"):
+            lines.append("CITATIONS: " + "; ".join(str(c) for c in item["citations"][:12]))
+        if item.get("not_covered"):
+            lines.append("NOT COVERED: " + str(item["not_covered"])[:600])
+        return "\n".join(lines)
+
+    def _deck_log_content(items, cap: int = 60000) -> str:
+        blocks = []
+        used = 0
+        for item in items:
+            block = _slide_log_block(item)
+            if used + len(block) > cap:
+                blocks.append(f"--- truncated: {len(items) - len(blocks)} further slide(s) "
+                              f"not logged (cap {cap} chars) ---")
+                break
+            blocks.append(block)
+            used += len(block)
+        return "\n\n".join(blocks)
+
     _run_col1, _run_col2 = st.columns(2)
     with _run_col1:
         _explain_one = st.button("🔍 Explain this slide", key=f"ppt_explain_one_{_digest}",
@@ -2417,7 +2450,12 @@ elif mode == "🧾 PPT Explainer":
         with st.spinner(f"Explaining slide {_selected_slide}..."):
             _explain_cache[(_digest, _selected_slide)] = explain_slide(
                 _deck, _selected_slide, interpret_images=_interpret_images)
-        log_ppt_explainer(_deck.slide_count, 1, "single_slide")
+        log_ppt_explainer(
+            _deck.slide_count, 1, "single_slide",
+            file_name=_ppt_file.name,
+            slides=str(_selected_slide),
+            detail=_slide_log_block(_explain_cache[(_digest, _selected_slide)] or {}),
+        )
 
     _cached_single = _explain_cache.get((_digest, _selected_slide))
     if _cached_single:
@@ -2440,8 +2478,13 @@ elif mode == "🧾 PPT Explainer":
         for _item in _deck_result["slides"]:
             _explain_cache[(_digest, _item["slide_number"])] = _item
         st.session_state[f"ppt_deck_result_{_digest}"] = _deck_result
-        log_ppt_explainer(_deck.slide_count, _deck_result["explained_count"],
-                          "subset" if _is_subset else "whole_deck")
+        log_ppt_explainer(
+            _deck.slide_count, _deck_result["explained_count"],
+            "subset" if _is_subset else "whole_deck",
+            file_name=_ppt_file.name,
+            slides=", ".join(str(n) for n in _deck_result["selected_slides"][:60]),
+            detail=_deck_log_content(_deck_result["slides"]),
+        )
         _progress.progress(1.0)
         _status.text("Deck explained.")
 
@@ -2585,12 +2628,30 @@ elif mode == "🧾 PPT Explainer":
 
                         _assess_coverage_now = (st.session_state.get(f"ppt_assess_{_digest}")
                                                 or {}).get("coverage") or {}
+                        _assess_result_now = st.session_state.get(f"ppt_assess_{_digest}") or {}
+                        _assess_blocks = []
+                        for _a in (_assess_result_now.get("assessments") or []):
+                            _assess_blocks.append("\n".join([
+                                f"--- Slide {_a.get('slide_number')}: {_a.get('title') or '(untitled)'}",
+                                "MUST KNOW: " + " | ".join(_a.get("must_know") or []),
+                                "MISCONCEPTION: " + str(_a.get("misconception") or ""),
+                                "CHECK QUESTION: " + str(_a.get("check_question") or ""),
+                                "EXPECTED ANSWER: " + str(_a.get("expected_answer") or ""),
+                                "NOT COVERED: " + str(_a.get("not_covered") or "None"),
+                            ]))
+                        _quiz_now = (_assess_result_now.get("quiz") or {}).get("questions") or []
+                        if _quiz_now:
+                            _assess_blocks.append("--- QUIZ ---\n" + "\n".join(
+                                f"Q{i}. {q.get('question')} :: {q.get('answer')}"
+                                for i, q in enumerate(_quiz_now, 1)))
                         log_ppt_assessment(
                             _deck.slide_count,
                             int(_assess_coverage_now.get("assessed", 0)),
                             int(_assess_quiz_count),
                             coverage=str(_assess_coverage_now.get("statement", "")),
                             gaps=len(_assess_coverage_now.get("slides_with_gaps") or []),
+                            file_name=_ppt_file.name,
+                            detail="\n\n".join(_assess_blocks)[:60000],
                         )
                     except Exception:
                         pass
