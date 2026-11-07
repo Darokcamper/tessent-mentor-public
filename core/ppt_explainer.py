@@ -294,23 +294,95 @@ def _citation(result: Dict[str, Any]) -> str:
 IMAGE_PROMPT = """You are looking at one picture taken from a technical presentation
 slide about Siemens Tessent / DFT.
 
-Describe only what is literally visible:
-- diagram blocks and their labels, signal names, arrows and their direction;
-- waveform names, axes and the transitions actually drawn;
-- command lines or code exactly as printed (copy them character for character);
-- tables and their column headers.
+Reply with findings only, starting immediately with these lines:
+TITLE: <the picture's own heading, copied exactly as printed, or NONE>
+TYPE: <one line: bullet list, scan chain, timing waveform, flowchart, block diagram, ...>
+CONTENT:
+- <diagram blocks and their labels, signal names, arrows and their direction>
+- <waveform names, axes and the transitions actually drawn>
+- <command lines or code exactly as printed (copy them character for character)>
+- <tables and their column headers>
 
 Hard rules:
 1. Never guess a label you cannot read. Write "label unreadable" instead.
 2. Never add a command, option, signal or architectural detail that is not visible.
 3. Never explain what the picture is *for* and never cite manual pages: that belongs to
    the separate evidence step.
-4. If the picture is decorative or unreadable, reply exactly: NO_TECHNICAL_CONTENT
+4. Never describe video-player furniture (play/pause, seek bar, timestamps, volume,
+   closed captions, gear, full screen) and never open with a sentence about yourself.
+5. If the picture is decorative or unreadable, reply exactly: NO_TECHNICAL_CONTENT
 
 Slide context (may be empty): {context}
 """
 
 NO_VISUAL_CONTENT = "NO_TECHNICAL_CONTENT"
+
+# Video-player furniture that a vision model reports when the picture is a frame grab.
+# None of it is presentation content, and in review it buried the actual diagram.
+_CHROME_RE = re.compile(
+    r"(play/?pause|pause button|seek bar|progress bar|scrub|timeline|current time|"
+    r"time remaining|time-remaining|volume (icon|slider|control)|mute|closed caption|"
+    r"\bCC\b button|settings (icon|button)|gear icon|cogwheel|\bcog\b|full[- ]?screen|"
+    r"exit full|player controls?|video player|control bar)", re.IGNORECASE)
+_TIMESTAMP_RE = re.compile(r"^\s*-?\d{1,2}:\d{2}(:\d{2})?\s*$")
+_UI_LABEL_RE = re.compile(r"^\s*[-*\d.\s]*(?P<label>[^:]{0,60}):", re.IGNORECASE)
+_PERSONA_RE = re.compile(
+    r"^(as a senior[^.]*\.|as an? [a-z ]{0,40}(engineer|trainer)[^.]*\.|"
+    r"here('| i)s (a|my) (detailed )?(analysis|description)[^.]*\.|"
+    r"based on the (provided )?image[^.]*\.|"
+    r"analysis of [^.]*\.)\s*", re.IGNORECASE)
+_TITLE_LINE_RE = re.compile(r"^\s*(?:TITLE|SLIDE TITLE)\s*:\s*(?P<title>.+?)\s*$", re.IGNORECASE)
+
+
+def _is_chrome_line(line: str) -> bool:
+    """A line whose subject is player furniture, not presentation content.
+
+    Keying on the label before the colon keeps real content alive: "Pause frames are shifted
+    out of the chain" is a technical statement, whereas "Play/Pause Button: two bars" is
+    furniture that happened to look like a bullet.
+    """
+    if _TIMESTAMP_RE.match(line):
+        return True
+    match = _UI_LABEL_RE.match(line)
+    if match and _CHROME_RE.search(match.group("label")):
+        return True
+    # Bare chrome with no colon, e.g. "Video Player Controls (bottom of the screen)".
+    if _CHROME_RE.search(line) and len(line.split()) <= 5:
+        return True
+    return False
+
+
+def clean_observation(text: str) -> str:
+    """Strip persona openers and video-player chrome from a picture description.
+
+    The description itself is kept; only lines carrying no presentation content are dropped,
+    so nothing that could support a claim is lost.
+    """
+    body = str(text or "")
+    kept = [line.strip() for line in body.splitlines()
+            if line.strip() and not _is_chrome_line(line)]
+    cleaned = _PERSONA_RE.sub("", "\n".join(kept)).strip()
+    return cleaned or body.strip()
+
+
+def observed_title(text: str) -> str:
+    """The picture's own heading as printed inside the image, if the model reported one."""
+    for line in str(text or "").splitlines():
+        match = _TITLE_LINE_RE.match(line)
+        if match:
+            title = match.group("title").strip().strip('"').strip("'")
+            return "" if title.upper() in {"NONE", "N/A", "UNKNOWN"} else title[:120]
+    return ""
+
+
+def _titles_differ(observed: str, slide_title: str) -> bool:
+    """True when a picture's own heading is a different topic from the slide's title."""
+    a = re.sub(r"[^a-z0-9 ]+", " ", str(observed or "").lower()).split()
+    b = re.sub(r"[^a-z0-9 ]+", " ", str(slide_title or "").lower()).split()
+    if not a or not b:
+        return False
+    shared = len(set(a) & set(b))
+    return shared < max(1, min(len(a), len(b)) // 2)
 
 
 def _default_vision(image_bytes: bytes, context: str = "", mime: str = "image/png") -> str:
@@ -356,12 +428,25 @@ def interpret_slide_images(
         result["analysed"] += 1
         if not description or NO_VISUAL_CONTENT in description.upper():
             continue
-        result["observations"].append({
+        description = clean_observation(description)
+        if not description or NO_VISUAL_CONTENT in description.upper():
+            continue
+        title_in_picture = observed_title(description)
+        observation = {
             "picture": picture["name"],
+            "ordinal": len(result["observations"]) + 1,
             "description": description,
+            "observed_title": title_in_picture,
             "verified": False,
             "kind": "visual_observation",
-        })
+        }
+        if title_in_picture:
+            observation["differs_from_slide_title"] = _titles_differ(title_in_picture, slide.title)
+        result["observations"].append(observation)
+    result["mismatched_titles"] = [
+        item["observed_title"] for item in result["observations"]
+        if item.get("differs_from_slide_title")
+    ]
     if result["error"] and not result["observations"]:
         result["available"] = False
     return result
@@ -395,10 +480,11 @@ def slide_sources(slide: Slide, evidence: List[Dict[str, Any]],
             "page": item.get("page"),
         })
     for item in ((images or {}).get("observations") or []):
-        sources.append({
-            "kind": "visual",
-            "label": f"picture '{item.get('picture')}' - description is unverified",
-        })
+        ordinal = item.get("ordinal") or 1
+        label = f"figure {ordinal} of this slide - description is unverified"
+        if item.get("observed_title"):
+            label += f"; its own heading reads '{item['observed_title']}'"
+        sources.append({"kind": "visual", "label": label})
     return sources
 
 
@@ -451,8 +537,15 @@ def _observations_block(images: Dict[str, Any]) -> Optional[str]:
         "evidence, carry no page numbers, and must not be used as the source of any technical",
         "claim):",
     ]
-    for item in observations:
-        lines.append(f"- picture '{item['picture']}': {item['description']}")
+    total = len(observations)
+    for position, item in enumerate(observations, start=1):
+        # Ordinal, never the file name: a name such as "image.png" once leaked into an
+        # explanation as "the reference context does not contain the file name image.png".
+        label = f"figure {position} of {total} on this slide"
+        observed = str(item.get("observed_title") or "").strip()
+        if observed:
+            label += f" (its own heading reads '{observed}')"
+        lines.append(f"- {label}: {item['description']}")
     if images.get("skipped"):
         lines.append(f"- ({images['skipped']} further picture(s) were not analysed.)")
     # Only stated when observations exist, so a text-only slide is never told about pictures.
@@ -533,6 +626,13 @@ GROUNDING RULES (MANDATORY):
 5. If the slide's subject is not covered by the reference context at all, still describe
    what the slide shows and label the topic as not covered by the knowledge base.
 6. Explain every abbreviation and command that appears on the slide.
+7. Write only about the slide and Tessent. Never mention the reference context, the prompt,
+   the retrieval step, picture file names or what is missing from the sources: no sentences
+   such as "the reference context does not contain ...", "the context does not include ..."
+   or "the file name ... is not present". The ONLY permitted statement about coverage is the
+   "{not_covered}" sentence required by rule 4, written as a statement about the topic.
+8. Never quote a picture file name (for example image.png). If you refer to a figure, call it
+   "the figure on this slide" or "the slide's figure".
 
 SLIDE CONTENT (slide {number} of {total}):
 {slide_body}
@@ -595,6 +695,7 @@ def explain_slide(
     interpret_images: bool = True,
     generate: bool = True,
     top_k: int = 6,
+    verify_citations: bool = True,
 ) -> Dict[str, Any]:
     """Explain one slide (1-based *index*).
 
@@ -641,6 +742,7 @@ def explain_slide(
         "coverage": relevance["label"],
         "explanation": None,
         "model_error": None,
+        "citation_check": None,
     }
 
     if not generate:
@@ -661,7 +763,22 @@ def explain_slide(
         return result
 
     result["explanation"] = str(explanation or "").strip() or NOT_COVERED
+    if verify_citations:
+        result["citation_check"] = verify_explanation_citations(result["explanation"])
+        if result["citation_check"] and result["citation_check"].get("changed"):
+            # Only the page number of a proven mismatch is rewritten; claims are untouched.
+            result["explanation"] = result["citation_check"]["corrected_text"]
     return result
+
+
+def verify_explanation_citations(text: str) -> Optional[Dict[str, Any]]:
+    """Check the citations of one explanation against the corpus pages. Never raises."""
+    try:
+        from core.citation_check import verify_text
+
+        return verify_text(text)
+    except Exception:
+        return None
 
 
 DECK_SUMMARY_PROMPT = """You are a senior Siemens Tessent DFT trainer. Below are the
@@ -701,18 +818,50 @@ def synthesise_deck(deck: Deck, slide_results: List[Dict[str, Any]], llm_fn: Opt
     }
 
 
-def estimate_deck_usage(deck: Deck, interpret_images: bool = True) -> Dict[str, Any]:
-    """Planned work for a deck *before* any call (F3: estimates are never cost figures)."""
+def estimate_deck_usage(deck: Deck, interpret_images: bool = True,
+                        slides: Optional[Iterable[int]] = None) -> Dict[str, Any]:
+    """Planned work *before* any call (F3: estimates are never cost figures).
+
+    With ``slides`` the estimate covers that selection and also reports the whole-deck
+    figure, so "116 explanation calls" is never shown next to "4 calls used" without saying
+    which is which.
+    """
     pictures = sum(len(slide.pictures) for slide in deck.slides)
     estimated_vision = pictures if interpret_images else 0
-    return {
+    estimate = {
         "slides": deck.slide_count,
         "estimated_explanation_calls": deck.slide_count + 1,  # per slide + synthesis
         "estimated_vision_calls": estimated_vision,
         "estimated_total_calls": deck.slide_count + 1 + estimated_vision,
         "pictures": pictures,
+        "scope": "whole_deck",
         "note": "Estimates from the deck structure only; no provider pricing is applied.",
     }
+
+    if slides is None:
+        return estimate
+
+    chosen = []
+    for number in slides:
+        try:
+            value = int(number)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= value <= deck.slide_count and value not in chosen:
+            chosen.append(value)
+    selected_pictures = sum(len(deck.slides[number - 1].pictures) for number in chosen)
+    selected_vision = selected_pictures if interpret_images else 0
+    estimate.update({
+        "scope": "selection",
+        "selected_slides": len(chosen),
+        "selected_explanation_calls": len(chosen) + 1,
+        "selected_vision_calls": selected_vision,
+        "selected_total_calls": len(chosen) + 1 + selected_vision,
+        "selected_pictures": selected_pictures,
+        "whole_deck_explanation_calls": deck.slide_count + 1,
+        "whole_deck_vision_calls": estimated_vision,
+    })
+    return estimate
 
 
 def _budget_snapshot() -> Optional[Dict[str, Any]]:
@@ -801,7 +950,9 @@ def _usage_report(deck: Deck, results: List[Dict[str, Any]], generate: bool,
     Only counts are reported. Token counts are shown only when a caller supplies them
     (the default chat path does not return usage metadata), and no price is invented.
     """
-    estimate = estimate_deck_usage(deck, interpret_images=interpret_images)
+    estimate = estimate_deck_usage(deck, interpret_images=interpret_images,
+                                   slides=[int(r.get("slide_number") or 0) for r in results
+                                           if r.get("slide_number")])
     vision_calls = sum(int(r.get("images", {}).get("analysed") or 0) for r in results)
     explanation_calls = sum(1 for r in results if r.get("explanation")) if generate else 0
     if generate and any(r.get("explanation") for r in results):

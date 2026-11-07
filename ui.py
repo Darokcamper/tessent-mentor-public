@@ -2009,6 +2009,13 @@ elif mode == "🧾 PPT Explainer":
                                     explain_slide, extract_deck, parse_slide_selection)
 
     try:
+        from core.assess_mode import assess_deck, recommended_scope
+        from core.assessment_export import build_document, to_docx, to_markdown
+        _ASSESS_AVAILABLE = True
+    except Exception:  # pragma: no cover - the explainer must survive a partial install
+        _ASSESS_AVAILABLE = False
+
+    try:
         from core.session_logger import log_ppt_explainer
     except Exception:  # pragma: no cover - logging must never break the UI
         def log_ppt_explainer(*args, **kwargs):
@@ -2099,15 +2106,16 @@ elif mode == "🧾 PPT Explainer":
     _estimate = estimate_deck_usage(_deck, interpret_images=_interpret_images)
     with st.expander("💵 Estimated work for this deck (before running)", expanded=False):
         st.markdown(
-            f"- Slides: **{_estimate['slides']}**\n"
+            f"**Whole deck ({_estimate['slides']} slides)**\n"
             f"- Estimated explanation calls: **{_estimate['estimated_explanation_calls']}** "
             f"(one per slide + one synthesis)\n"
             f"- Estimated vision calls: **{_estimate['estimated_vision_calls']}**\n"
             f"- Estimated total calls: **{_estimate['estimated_total_calls']}**"
         )
         st.caption(
-            "Counts only. No provider price is applied, and no token figure is invented — "
-            "actual usage after a run is shown separately."
+            "These are deck-wide figures. The run below only covers the slides you select, "
+            "so its actual counts are expected to be far lower — the estimate for your "
+            "selection is shown next to the run buttons."
         )
 
     st.markdown("#### Slides")
@@ -2145,6 +2153,19 @@ elif mode == "🧾 PPT Explainer":
         _preview = ", ".join(str(number) for number in _selected_numbers[:12])
         _more = "" if len(_selected_numbers) <= 12 else f" ... (+{len(_selected_numbers) - 12} more)"
         st.caption(f"{len(_selected_numbers)} slide(s) selected: {_preview}{_more}")
+
+    _selection_estimate = estimate_deck_usage(
+        _deck, interpret_images=_interpret_images,
+        slides=_selected_numbers if (_is_subset and _selected_numbers) else None,
+    )
+    if _selection_estimate.get("scope") == "selection":
+        st.caption(
+            f"Estimated work for this selection: "
+            f"**{_selection_estimate['selected_explanation_calls']}** explanation call(s) + "
+            f"**{_selection_estimate['selected_vision_calls']}** vision call(s) = "
+            f"**{_selection_estimate['selected_total_calls']}** total "
+            f"(whole deck would be {_selection_estimate['estimated_total_calls']})."
+        )
 
     _labels = {slide.number: slide.display_label() for slide in _deck.slides}
     _nav_col1, _nav_col2, _nav_col3 = st.columns([2, 1, 1])
@@ -2207,6 +2228,22 @@ elif mode == "🧾 PPT Explainer":
         else:
             st.info("No explanation generated yet for this slide.")
 
+        _check = _result.get("citation_check") or {}
+        if _check.get("total"):
+            try:
+                from core.citation_check import summary_line as _citation_summary
+
+                _check_line = _citation_summary(_check)
+            except Exception:
+                _check_line = ""
+            if _check_line:
+                if _check.get("counts", {}).get("verified") == _check.get("total"):
+                    st.caption(f"✅ {_check_line}")
+                elif _check.get("pages_missing"):
+                    st.warning(f"⚠️ {_check_line}")
+                else:
+                    st.caption(f"🔎 {_check_line}")
+
         if _result.get("model_error"):
             st.warning(
                 f"Model unavailable ({_result['model_error']}). Extraction and references are "
@@ -2257,10 +2294,22 @@ elif mode == "🧾 PPT Explainer":
                 expanded=False,
             ):
                 for _obs in _images["observations"]:
-                    st.markdown(f"- **{_obs['picture']}**: {_obs['description']}")
+                    _obs_head = f"figure {_obs.get('ordinal', '?')} of this slide"
+                    if _obs.get("observed_title"):
+                        _obs_head += f" — its own heading reads “{_obs['observed_title']}”"
+                    st.markdown(f"- **{_obs_head}**: {_obs['description']}")
+                if _images.get("mismatched_titles"):
+                    st.warning(
+                        "A picture on this slide carries its own heading which differs from "
+                        "the slide title ("
+                        + "; ".join(f"“{title}”" for title in _images["mismatched_titles"])
+                        + "). Such pictures are frames from the source video embedded in the "
+                        "slide, so they show neighbouring topics — not this slide's own text."
+                    )
                 st.caption(
                     "Described from the deck's own pictures. This is not manual evidence: it "
-                    "carries no page number and is never used as the source of a technical claim."
+                    "carries no page number and is never used as the source of a technical claim. "
+                    "Video-player furniture is filtered out."
                 )
         elif _images.get("error"):
             st.caption(
@@ -2388,4 +2437,145 @@ elif mode == "🧾 PPT Explainer":
             mime="text/markdown",
             key=f"ppt_export_{_digest}",
         )
+
+    # ── Fresher assessment mode (WP-11) ──────────────────────────────────────
+    if _ASSESS_AVAILABLE:
+        st.markdown("---")
+        st.markdown("### 🎓 Fresher assessment")
+        st.caption(
+            "Turns the same grounded pipeline into a trainer's sheet: three must-knows, the "
+            "mistake freshers usually make, one check question with its expected answer, a "
+            "quiz, and a provenance appendix listing every manual page used. Exports to .docx."
+        )
+        _scope = recommended_scope(_deck)
+        st.markdown(f"**Recommended scope:** {_scope['note']}")
+        if _scope.get("skipped_labs"):
+            st.caption("LAB exercise slides skipped: "
+                       + ", ".join(str(number) for number in _scope["skipped_labs"]))
+        for _flow in _scope["flows"]:
+            if _flow["slides"]:
+                st.caption(f"- {_flow['name']}: slides "
+                           + ", ".join(str(number) for number in _flow["slides"]))
+
+        _a_col1, _a_col2, _a_col3 = st.columns([1, 1, 2])
+        with _a_col1:
+            _assess_recommended = st.checkbox("Recommended scope", value=True,
+                                              key=f"assess_rec_{_digest}")
+        with _a_col2:
+            _assess_quiz_count = st.number_input("Quiz questions", min_value=0, max_value=25,
+                                                 value=10, key=f"assess_quiz_{_digest}")
+        with _a_col3:
+            _assess_title = st.text_input("Sheet title", value="Fresher assessment",
+                                          key=f"assess_title_{_digest}")
+
+        _assess_slides = _scope["slides"] if _assess_recommended else list(_selected_numbers)
+        _assess_blocked = (not _assess_recommended) and _selection_error is not None
+        if _assess_blocked:
+            st.error("Fix the slide selection above first.")
+        else:
+            st.caption(f"{len(_assess_slides)} slide(s) will be assessed"
+                       + (f": {', '.join(str(n) for n in _assess_slides)}"
+                          if _assess_slides else ""))
+
+        if st.button(f"🎓 Build the assessment ({len(_assess_slides)} slides + quiz)",
+                     key=f"assess_run_{_digest}", use_container_width=True,
+                     disabled=_assess_blocked or not _assess_slides):
+            if ensure_llm_access():
+                _assess_progress = st.progress(0)
+                _assess_status = st.empty()
+
+                def _on_assess_progress(done, total):
+                    _assess_progress.progress(done / max(1, total))
+                    _assess_status.text(f"Assessing {done}/{total} slide(s)...")
+
+                try:
+                    with st.spinner("Building the assessment sheet..."):
+                        st.session_state[f"ppt_assess_{_digest}"] = assess_deck(
+                            _deck,
+                            slides=None if _assess_recommended else _assess_slides,
+                            interpret_images=False,
+                            quiz_count=int(_assess_quiz_count),
+                            on_progress=_on_assess_progress,
+                        )
+                    _assess_progress.progress(1.0)
+                    _assess_status.text("Assessment built.")
+                except Exception as _assess_error:
+                    st.error(f"Assessment failed ({type(_assess_error).__name__}). The "
+                             "per-slide explanations above are unaffected.")
+
+        _assess_result = st.session_state.get(f"ppt_assess_{_digest}")
+        if _assess_result:
+            _assess_coverage = _assess_result.get("coverage") or {}
+            st.markdown(f"**Coverage:** {_assess_coverage.get('statement', '')}")
+
+            for _a_item in _assess_result.get("assessments") or []:
+                with st.expander(_a_item["label"], expanded=False):
+                    if _a_item.get("must_know"):
+                        st.markdown("**Must be able to state**")
+                        for _point in _a_item["must_know"]:
+                            st.markdown(f"- {_point}")
+                    if _a_item.get("misconception"):
+                        st.markdown(f"**Typical mistake:** {_a_item['misconception']}")
+                    if _a_item.get("check_question"):
+                        st.markdown(f"**Check question:** {_a_item['check_question']}")
+                    if _a_item.get("expected_answer"):
+                        st.markdown(f"**Expected answer:** {_a_item['expected_answer']}")
+                    if _a_item.get("not_covered"):
+                        st.warning(f"Not covered by the knowledge base: {_a_item['not_covered']}")
+                    if _a_item.get("parse_error"):
+                        st.warning(f"{_a_item['parse_error']} - the reply is shown raw.")
+                        st.code(_a_item.get("raw_text") or "", language="text")
+                    _a_check = _a_item.get("citation_check") or {}
+                    if _a_check.get("total"):
+                        try:
+                            from core.citation_check import summary_line as _citation_summary
+
+                            st.caption("🔎 " + _citation_summary(_a_check))
+                        except Exception:
+                            pass
+
+            _assess_quiz = (_assess_result.get("quiz") or {}).get("questions") or []
+            if _assess_quiz:
+                st.markdown("#### End-of-session quiz")
+                for _q_index, _q in enumerate(_assess_quiz, start=1):
+                    st.markdown(f"{_q_index}. {_q['question']}")
+                with st.expander("Answer key", expanded=False):
+                    for _q_index, _q in enumerate(_assess_quiz, start=1):
+                        _where = f" (slide {_q['slide']})" if _q.get("slide") else ""
+                        st.markdown(f"{_q_index}. {_q['answer']}{_where}")
+            elif (_assess_result.get("quiz") or {}).get("skipped"):
+                st.caption(f"Quiz not built: {_assess_result['quiz']['skipped']}")
+
+            try:
+                # The uploaded file name is deliberately NOT put into the handout.
+                _handout = build_document(
+                    _assess_result,
+                    title=_assess_title,
+                    deck_label=f"{_deck.slide_count}-slide presentation",
+                )
+                _dl_col1, _dl_col2 = st.columns(2)
+                with _dl_col1:
+                    st.download_button(
+                        "⬇️ Download assessment (.docx)", data=to_docx(_handout),
+                        file_name="fresher_assessment.docx",
+                        mime="application/vnd.openxmlformats-officedocument."
+                             "wordprocessingml.document",
+                        key=f"assess_docx_{_digest}", use_container_width=True,
+                    )
+                with _dl_col2:
+                    st.download_button(
+                        "⬇️ Download assessment (.md)", data=to_markdown(_handout),
+                        file_name="fresher_assessment.md", mime="text/markdown",
+                        key=f"assess_md_{_digest}", use_container_width=True,
+                    )
+            except Exception as _export_error:
+                st.warning(f"Export unavailable ({type(_export_error).__name__}); the "
+                           "assessment is still readable above.")
+
+            _assess_usage = _assess_result.get("usage") or {}
+            st.caption(
+                f"Calls used: {_assess_usage.get('assessment_calls', 0)} assessment + "
+                f"{_assess_usage.get('quiz_calls', 0)} quiz + "
+                f"{_assess_usage.get('vision_calls', 0)} vision."
+            )
 
