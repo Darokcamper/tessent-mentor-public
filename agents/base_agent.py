@@ -600,6 +600,10 @@ Let's begin!
     agent_scratchpad = []
     max_iterations = 5
     tools_called = False
+    # True once a tool actually printed a "Source Document: <file> (Page N)" line, which is
+    # what makes an answer groundable. A call to list_verified_sources() is a catalogue
+    # lookup, not evidence, so it does not count.
+    evidence_seen = False
 
     for i in range(max_iterations):
         current_messages = list(messages)
@@ -632,14 +636,14 @@ Let's begin!
             final_part = content.split("Final Answer:", 1)[1].strip()
             final_part = normalize_final_answer(final_part)
             # Nothing leaves the agent until every citation is proved against the corpus.
-            return guard_or_strip(final_part)
+            return guard_or_strip(final_part, retrieved=evidence_seen)
             
         action_match = re.search(r"Action:\s*(\w+\(.*?\))", content, re.DOTALL)
         if not action_match:
             if "Thought:" in content:
                 agent_scratchpad.append((content, "Error: You did not specify an Action. If you are ready, output 'Final Answer: <your answer>'. Otherwise specify Action: tool_name(args)."))
                 continue
-            return guard_or_strip(content)
+            return guard_or_strip(content, retrieved=evidence_seen)
 
         action_str = action_match.group(1).strip()
         tool_name, args = parse_action(action_str)
@@ -655,6 +659,8 @@ Let's begin!
             print(f"Observation: {observation[:200]}...")
             
         agent_scratchpad.append((content, observation))
+        if "Source Document:" in str(observation):
+            evidence_seen = True
 
     # Final wrap up if it timed out
     current_messages = list(messages)
@@ -667,7 +673,8 @@ Let's begin!
         response = llm.invoke(current_messages)
         content = response.content.strip()
         if "Final Answer:" in content:
-            return guard_or_strip(content.split("Final Answer:", 1)[1].strip())
-        return guard_or_strip(content)
+            return guard_or_strip(content.split("Final Answer:", 1)[1].strip(),
+                                  retrieved=evidence_seen)
+        return guard_or_strip(content, retrieved=evidence_seen)
     except Exception as e:
         return f"Error finalizing agent answer: {e}"

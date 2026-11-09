@@ -117,7 +117,7 @@ def stream_expert(question, persona_title, expertise_area, history=None, extra_c
     except Exception as error:  # pragma: no cover - transport failure mid-stream
         collected.append(f"\n\n[stream interrupted: {type(error).__name__}]")
 
-    answer = guard_or_strip("".join(collected))
+    answer = guard_or_strip("".join(collected), retrieved=NO_CONTEXT_SENTINEL not in prompt)
     for piece in re.findall(r"\S+\s*", answer):
         yield piece
 
@@ -132,4 +132,5 @@ def ask_expert(question, persona_title, expertise_area, history=None, extra_cont
     prompt = build_expert_prompt(question, persona_title, expertise_area, history, extra_context)
     response = llm.invoke(prompt)
     # Nothing leaves the agent until every citation is proved against the corpus.
-    return guard_or_strip(response.content.strip())
+    return guard_or_strip(response.content.strip(),
+                          retrieved=NO_CONTEXT_SENTINEL not in prompt)

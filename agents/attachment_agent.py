@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from agents.attachment_context import set_attachment_context, clear_attachment_context
 from agents import router_agent
+from core.answer_guard import guard_or_strip
 from core.file_reader import MIME_MAP
 from core.llm import llm
 from core.rag_builder import retrieve
@@ -115,6 +116,8 @@ def ask_with_image(question, image_bytes, image_name, history=None, _topic=None)
 1. Answer ONLY from the "Reference Context" provided below.
 2. Do NOT invent commands, options, arguments, errors, or file types not present in the context.
 3. For EVERY claim, append a citation [Source: <file>, Page <N>] taken from the context.
+   Copy the file name and page exactly as the Reference Context prints them. Never invent a
+   file name or page number: if no context line supports a claim, say so instead of citing.
 4. If the context does not contain the answer, write:
    "The retrieved manual context does not contain enough detail to answer this definitively."
    and DO NOT guess.
@@ -142,4 +145,6 @@ Instructions:
 """
 
     response = llm.invoke_vision(prompt, image_bytes, mime)
-    return response.content.strip()
+    # The image path builds its own prompt, so it must run the same citation guard as the
+    # agent funnels; without this it was the one door an invented citation could walk through.
+    return guard_or_strip(response.content.strip(), retrieved=bool(results))

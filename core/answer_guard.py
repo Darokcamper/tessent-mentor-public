@@ -36,15 +36,22 @@ _CITATION_PATTERNS = (
                r"Page\s*(?P<page>\d{1,5})\s*\)?"),
 )
 
-UNGROUNDED_NOTE = (
-    "> \u26a0\ufe0f **Not grounded in the Tessent knowledge base.** No verified page supports "
-    "these statements, so no page is cited. Treat this as general engineering background and "
-    "check it against the manuals before relying on it."
+OUTSIDE_SOURCE_NOTE = (
+    "> \u2139\ufe0f **Outside the verified sources.** This answer is general engineering "
+    "knowledge, not a statement taken from the Tessent manuals, so no manual page is cited "
+    "for it. Confirm anything you plan to act on against the manuals."
+)
+
+OUTSIDE_SOURCE_SEARCHED_NOTE = (
+    "> \u2139\ufe0f **Outside the verified sources.** The knowledge base was searched and holds "
+    "no page that supports this answer, so no manual page is cited. Treat it as general "
+    "engineering knowledge and confirm it against the manuals."
 )
 
 UNVERIFIABLE_NOTE = (
-    "> \u26a0\ufe0f **Citations withheld.** The knowledge base could not be checked on this "
-    "host, so no page is cited. Treat this as general engineering background."
+    "> \u26a0\ufe0f **Citations withheld, sources not checked.** The knowledge base is not "
+    "available on this host, so nothing could be verified and no page is cited. Treat this as "
+    "general engineering knowledge."
 )
 
 
@@ -87,7 +94,6 @@ def strip_unsupported_citations(text: str, root: Optional[Path] = None) -> Dict[
     if not found:
         return {"text": body, "kept": [], "removed": [], "grounded": False, "note": ""}
 
-    checking = corpus_available(root)
     kept: List[Dict[str, Any]] = []
     removed: List[Dict[str, Any]] = []
     replacements: List[tuple] = []
@@ -115,25 +121,78 @@ def strip_unsupported_citations(text: str, root: Optional[Path] = None) -> Dict[
         guarded = guarded[:start] + replacement + guarded[end:]
     guarded = _tidy(guarded)
 
-    note = ""
-    if not kept:
-        note = UNGROUNDED_NOTE if checking else UNVERIFIABLE_NOTE
-        guarded = f"{guarded}\n\n{note}".strip() if guarded else note
-
     return {"text": guarded, "kept": kept, "removed": removed,
-            "grounded": bool(kept), "note": note}
+            "grounded": bool(kept), "note": ""}
 
 
-def guard_or_strip(text: str, root: Optional[Path] = None) -> str:
-    """Text safe to display. Never fails open.
+# An answer that already refuses has stated its status; labelling it again would just say
+# "not from the sources" twice. Kept here (not imported from agents/) so core stays below
+# the agent layer.
+_ABSTENTION_MARKERS = (
+    "do not have this information",
+    "do not have the exact answer",
+    "not in my verified source",
+    "does not contain enough detail",
+    "retrieved manual context does not contain",
+)
 
-    If the verifier itself raises, every citation marker is removed rather than trusted -
-    an outage in the checker must not become an outage in the guarantee.
+
+def is_abstention(text: str) -> bool:
+    """True when the answer already tells the reader it is not in the sources."""
+    lowered = str(text or "").lower()
+    return any(marker in lowered for marker in _ABSTENTION_MARKERS)
+
+
+def guard_answer(text: str, *, retrieved: bool = False,
+                 root: Optional[Path] = None) -> Dict[str, Any]:
+    """Everything safe to show, plus a verdict - for *every* answer, cited or not.
+
+    A verified citation means the answer is grounded and needs no label. Anything else is
+    labelled out loud, because an answer a reader cannot tell apart from a grounded one is
+    the failure this module exists to prevent. ``retrieved`` records whether the knowledge
+    base was actually searched, which changes what the label can honestly claim.
     """
     try:
-        return strip_unsupported_citations(text, root=root)["text"]
+        result = strip_unsupported_citations(text, root=root)
     except Exception:  # pragma: no cover - defensive
-        return _tidy(re.sub(r"\[Source:[^\]]*\]", "", str(text or "")))
+        result = {"text": _tidy(re.sub(r"\[Source:[^\]]*\]", "", str(text or ""))),
+                  "kept": [], "removed": [], "grounded": False, "note": ""}
+
+    if result["kept"]:
+        return result
+
+    if is_abstention(result["text"]):
+        # The answer refuses to answer; that is already the plainest possible statement
+        # that it is not sourced, so no second label is added.
+        return result
+
+    if not corpus_available(root):
+        note = UNVERIFIABLE_NOTE
+    elif retrieved:
+        note = OUTSIDE_SOURCE_SEARCHED_NOTE
+    else:
+        note = OUTSIDE_SOURCE_NOTE
+
+    body = result["text"] or ""
+    result["text"] = f"{body}\n\n{note}".strip() if body else note
+    result["note"] = note
+    result["grounded"] = False
+    return result
+
+
+def guard_or_strip(text: str, *, retrieved: bool = False,
+                   root: Optional[Path] = None) -> str:
+    """Text safe to display. Never fails open.
+
+    If the verifier itself raises, every citation marker is removed and the answer is
+    labelled, rather than trusted - an outage in the checker must not become an outage in
+    the guarantee.
+    """
+    try:
+        return guard_answer(text, retrieved=retrieved, root=root)["text"]
+    except Exception:  # pragma: no cover - defensive
+        stripped = _tidy(re.sub(r"\[Source:[^\]]*\]", "", str(text or "")))
+        return f"{stripped}\n\n{OUTSIDE_SOURCE_NOTE}".strip()
 
 
 def guard_line(result: Dict[str, Any]) -> str:
@@ -147,5 +206,3 @@ def guard_line(result: Dict[str, Any]) -> str:
     if not removed:
         return f"{kept} citation(s) verified against the cited page"
     return f"{kept} citation(s) verified \u00b7 {removed} removed as unprovable"
-
-    return text.strip()
