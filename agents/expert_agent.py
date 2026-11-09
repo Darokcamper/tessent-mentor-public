@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import re
+
 from agents.base_agent import (
     NO_CONTEXT_SENTINEL,
     retrieval_failed,
@@ -5,6 +9,7 @@ from agents.base_agent import (
 )
 from agents.attachment_context import get_attachment_context
 from core.llm import llm
+from core.answer_guard import guard_or_strip
 
 def build_expert_prompt(question, persona_title, expertise_area, history=None, extra_context=None):
     # WP-8: context retention for follow-ups lives in one tested helper; vocabulary
@@ -55,6 +60,9 @@ def build_expert_prompt(question, persona_title, expertise_area, history=None, e
 1. Answer ONLY from the "Reference Context" provided below.
 2. Do NOT invent commands, options, arguments, errors, or file types not present in the context.
 3. For EVERY claim, append a citation [Source: <file>, Page <N>] taken from the context.
+   Copy the file name and page exactly as the Reference Context prints them. Never invent a
+   file name or page number: a citation you cannot point to is worse than none. If a claim
+   has no supporting line in the context, say so instead of citing.
 4. If the context does not contain the answer, write:
    "The retrieved manual context does not contain enough detail to answer this definitively."
    and DO NOT guess.
@@ -83,21 +91,35 @@ Instructions:
     return prompt
 
 def stream_expert(question, persona_title, expertise_area, history=None, extra_context=None):
-    """Generator yielding response tokens for real-time streaming."""
+    """Generator yielding the *verified* answer as text pieces.
+
+    The tokens are buffered until the model finishes. A citation can only be judged once
+    its page text is in hand, and a fabricated pointer must never be displayed even for a
+    moment, so the guard runs before the first piece is yielded. The generator interface is
+    unchanged, so ``st.write_stream`` and the caller keep working.
+    """
     prompt = build_expert_prompt(question, persona_title, expertise_area, history, extra_context)
-    for chunk in llm.stream(prompt):
-        if hasattr(chunk, "content"):
-            content = chunk.content
-            if isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and "text" in part:
-                        yield part["text"]
-                    elif isinstance(part, str):
-                        yield part
-            elif isinstance(content, str):
-                yield content
-        else:
-            yield str(chunk)
+    collected = []
+    try:
+        for chunk in llm.stream(prompt):
+            if hasattr(chunk, "content"):
+                content = chunk.content
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and "text" in part:
+                            collected.append(part["text"])
+                        elif isinstance(part, str):
+                            collected.append(part)
+                elif isinstance(content, str):
+                    collected.append(content)
+            else:
+                collected.append(str(chunk))
+    except Exception as error:  # pragma: no cover - transport failure mid-stream
+        collected.append(f"\n\n[stream interrupted: {type(error).__name__}]")
+
+    answer = guard_or_strip("".join(collected))
+    for piece in re.findall(r"\S+\s*", answer):
+        yield piece
 
 def ask_expert(question, persona_title, expertise_area, history=None, extra_context=None, stream=False):
     """
@@ -109,4 +131,5 @@ def ask_expert(question, persona_title, expertise_area, history=None, extra_cont
         return stream_expert(question, persona_title, expertise_area, history, extra_context)
     prompt = build_expert_prompt(question, persona_title, expertise_area, history, extra_context)
     response = llm.invoke(prompt)
-    return response.content.strip()
+    # Nothing leaves the agent until every citation is proved against the corpus.
+    return guard_or_strip(response.content.strip())

@@ -5,6 +5,7 @@ import importlib
 from pathlib import Path
 from core.llm import llm
 from core.rag_builder import retrieve
+from core.answer_guard import guard_or_strip
 from agents.attachment_context import get_attachment_context
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -530,8 +531,8 @@ You are an autonomous AI agent. To solve the user's question, you must search an
 
 You have access to the following tools:
 1. `list_verified_sources()`: Returns a list of all verified source filenames and their topics in the knowledge catalog. Use this if you are unsure which files contain relevant information.
-2. `search_verified_notes(query: str, source_filter: str)`: Searches the vector database for matching chunks across all notes, or within a specific file if `source_filter` (file stem, e.g. "Scan_DRC_part_2") is provided.
-3. `read_source_file_page(filename_stem: str, page_num: int)`: Reads the literal text of a specific page from a source note file (e.g., "Level_1_Session_1", 5).
+2. `search_verified_notes(query: str, source_filter: str)`: Searches the vector database for matching chunks across all notes, or within a specific file if `source_filter` is provided. `source_filter` must be a real file stem taken from `list_verified_sources()` or from an observation, e.g. "atpg_gd".
+3. `read_source_file_page(filename_stem: str, page_num: int)`: Reads the literal text of a specific page from a source note file (e.g., "atpg_gd", 32).
 4. `remember_design_constraint(key: str, value: str)`: Saves or updates a design constraint in the SQLite memory database.
 5. `recall_design_constraint(key: str)`: Recalls a saved design constraint from the SQLite memory database.
 6. `validate_tcl_syntax(script: str)`: Validates the syntax of a TCL script, checking for balanced braces, brackets, parentheses, and quotes.
@@ -550,6 +551,16 @@ Thought: I have retrieved sufficient verified information to answer the question
 Final Answer: <Your final comprehensive answer, strictly grounded in the observations. Always start your Final Answer with a "### 🧑‍🏫 Layman's Explanation" section explaining the core concept in plain, simple, everyday terms/analogies for a beginner. Then follow with your comprehensive technical explanation, citing the Source Document and Page when referencing ideas from the notes. Avoid repeating any OCR noise or corrupted formulas, and explain them in correct standard engineering English. Structure your answer with clear headings, bullet points, and comparison tables where appropriate.>
 
 If you cannot find the answer in the verified documents after searching, your Final Answer MUST be: "I do not have the exact answer in my verified source documents." and then list the relevant source files or manuals found in the context with citations (e.g., `[Source: filename, Page N]`) and a 1-sentence summary of what topics that file covers on that page, recommending how the user can refine their question.
+
+CITATION RULE (MANDATORY - a citation you cannot prove is worse than no citation):
+- Cite a page ONLY when an observation in this conversation printed that exact
+  "Source Document: <file> (Page <N>)" line. Copy the file name exactly as it appeared.
+- Never invent a file name or a page number, and never turn an example from these
+  instructions into a citation. File names that appear here are illustrations only.
+- Use the bracketed form: [Source: <file>, Page <N>].
+- If no observation supports a sentence, leave the citation off that sentence and say the
+  detail is not in the verified documents. Never attach a citation to cover a gap.
+- An answer with no verified page must say so plainly instead of citing anything.
 
 Let's begin!
 """
@@ -620,15 +631,16 @@ Let's begin!
                 continue
             final_part = content.split("Final Answer:", 1)[1].strip()
             final_part = normalize_final_answer(final_part)
-            return final_part
+            # Nothing leaves the agent until every citation is proved against the corpus.
+            return guard_or_strip(final_part)
             
         action_match = re.search(r"Action:\s*(\w+\(.*?\))", content, re.DOTALL)
         if not action_match:
             if "Thought:" in content:
                 agent_scratchpad.append((content, "Error: You did not specify an Action. If you are ready, output 'Final Answer: <your answer>'. Otherwise specify Action: tool_name(args)."))
                 continue
-            return content
-            
+            return guard_or_strip(content)
+
         action_str = action_match.group(1).strip()
         tool_name, args = parse_action(action_str)
         
@@ -655,7 +667,7 @@ Let's begin!
         response = llm.invoke(current_messages)
         content = response.content.strip()
         if "Final Answer:" in content:
-            return content.split("Final Answer:", 1)[1].strip()
-        return content
+            return guard_or_strip(content.split("Final Answer:", 1)[1].strip())
+        return guard_or_strip(content)
     except Exception as e:
         return f"Error finalizing agent answer: {e}"
