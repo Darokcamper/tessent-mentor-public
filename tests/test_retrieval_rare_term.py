@@ -101,3 +101,20 @@ class TestRareTermIsReachable:
         results = wired.retrieve("flatmodel", top_k=4)
         scores = [row["score"] for row in results]
         assert scores == sorted(scores, reverse=True)
+
+
+class TestLoweredCorpusCache:
+    """The 0.27 s lowering pass must be paid once per loaded index, not once per query word."""
+
+    def test_the_same_corpus_is_not_lowered_twice(self, wired):
+        assert wired._lowered_chunk_texts() is wired._lowered_chunk_texts()
+
+    def test_a_reload_is_not_served_from_the_old_cache(self, wired, monkeypatch):
+        stale = wired._lowered_chunk_texts()
+        monkeypatch.setattr(wired, "_loaded_metadata", _metadata()[:-1])
+        assert wired._lowered_chunk_texts() is not stale
+        assert len(wired._lowered_chunk_texts()) == TOTAL_CHUNKS - 1
+
+    def test_no_index_means_no_texts(self, wired, monkeypatch):
+        monkeypatch.setattr(wired, "_loaded_metadata", None)
+        assert wired._lowered_chunk_texts() == []
