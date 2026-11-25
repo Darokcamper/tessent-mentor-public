@@ -135,13 +135,21 @@ The user's question (alongside the attached image) is:
 {question}
 
 Instructions:
-0. ALWAYS start your response with a dedicated section:
-   "### 🧑‍🏫 Layman's Explanation (Intuitive Analogy)"
-   Explain the core concept or what is happening in the image/question in simple, everyday layman's terms using an intuitive real-world analogy (e.g. airport luggage scanner, postal sorting, factory assembly line) so any beginner can immediately understand before reading the technical details.
-1. Provide a comprehensive, accurate technical answer using ONLY the reference context above.
-2. Cite each supporting fact with [Source: <file>, Page <N>].
-3. If a specific detail is not supported by the context, say so instead of guessing.
-4. Structure your answer with clear headings, bullet points, and comparison tables where appropriate.
+1. Start with "### Answer": one to three sentences answering the question from the Reference
+   Context and the attached image, each ending with its own marker.
+2. Then "### Evidence": one bullet per fact, one sentence each, each ending with its own marker.
+3. The marker is either a manual citation [Source: <file>, Page <N>] for anything taken from the
+   Reference Context, or [Image: <what you actually see>] for anything taken from the attachment.
+   A statement about the image must NEVER carry a manual citation, and a statement from the
+   context must never be marked as an image observation.
+4. No analogies, no comparisons to everyday life, no "think of it as ...". They assert technical
+   behaviour that neither the context nor the image shows.
+5. No background knowledge and no reasoning from first principles: if the context and the image
+   do not show it, do not write it.
+6. Do not use hedges neither source uses ("typically", "generally", "in most cases").
+7. If part of the question is not supported by the context or the image, add a final
+   "### Not covered by the sources" section naming that part in one line, with no guess.
+8. If you cannot read a detail in the image, say so plainly instead of inferring it.
 """
 
     response = llm.invoke_vision(prompt, image_bytes, mime)

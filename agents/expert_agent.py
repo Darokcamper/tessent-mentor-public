@@ -81,12 +81,25 @@ Question / Issue:
 {question}
 
 Instructions:
-1. Always start your response with a dedicated "### 🧑‍🏫 Layman's Explanation" section: explain the core concept, command, or issue in simple, plain, beginner-friendly terms with an intuitive everyday analogy (e.g. plumbing, highway traffic, postal mail, airport security) so anyone without deep DFT experience can grasp it immediately.
-2. Follow with a comprehensive, accurate technical answer using ONLY the reference context above.
-3. Cite each supporting fact with [Source: <file>, Page <N>].
-4. If a specific detail is not supported by the context, say so instead of guessing.
-5. Structure your answer with clear headings, bullet points, and comparison tables where appropriate.
-6. If this question is a follow-up, maintain conversational continuity while strictly grounding technical facts in the Reference Context.
+1. Start with "### Answer": one to three sentences that answer the question using ONLY the
+   Reference Context, each ending with its own [Source: <file>, Page <N>].
+2. Then "### Evidence": one bullet per fact, each bullet a single sentence, each ending with its
+   own [Source: <file>, Page <N>].
+3. No analogies, no comparisons to everyday life, no "think of it as ...". They assert technical
+   behaviour the context never states, and a reader cannot tell which parts were invented.
+4. No background knowledge and no reasoning from first principles: if the Reference Context does
+   not state it, do not write it.
+5. Every sentence that states a fact carries its own citation on that same sentence. A citation
+   at the end of a paragraph does not cover the sentences before it.
+6. Do not use hedges the context does not use ("typically", "generally", "in most cases").
+7. Do not add a summary, comparison table, or "why this matters" section.
+8. If part of the question is not supported by the context, add a final "### Not covered by the
+   sources" section naming that part in one line, with no guess at the answer.
+9. If this question is a follow-up, maintain conversational continuity while strictly grounding
+   technical facts in the Reference Context.
+
+Every sentence you write is re-checked against the page you cite, and sentences that page does
+not support are deleted before the user sees the answer. Writing less is the safer choice.
 """
     return prompt
 

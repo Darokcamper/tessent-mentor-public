@@ -51,8 +51,30 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 # A citation is "supported" when enough of the sentence's distinctive words are actually
 # printed on the page. Two independent conditions keep single common words from passing.
+#
+# Measured failure (2026-11-25) that the plain overlap test let through: the claim
+# "STA mathematically analyzes all possible timing paths in the design ... without requiring
+# test vectors" was verified against atpg_gd.txt p258 - a page about clock selection for test
+# point flops. Overlap 0.455, matched = possible, timing, paths, clock, input; every one of
+# those is on 800-2100 of the 15,767 corpus pages, while mathematically / analyzes / requiring /
+# vectors matched nothing. So a page that merely shares the subject could vouch for any
+# sentence about that subject.
+#
+# The fix is a second way in: either the sentence is close to verbatim from the page, or at
+# least two of the matched terms are *distinctive* (printed on few pages).
+#
+# Thresholds chosen from the sentences of the answer that motivated this, scored against the
+# pages they cited (overlap, distinctive terms):
+#   invented  0.400 / 0        invented  0.375 / 1 (closure)      invented  0.333 / 0
+#   genuine   0.643 / 1        0.667 / 0       0.700 / 3       0.750 / 0       0.933 / 7
+# A single distinctive term was not enough - "timing closure" is on enough pages to let a
+# general claim about closure through - while two distinctive terms or a 0.6 overlap only
+# happened on sentences whose wording the page really carries.
 MIN_OVERLAP = 0.34
 MIN_MATCHED_TERMS = 2
+MIN_DISTINCTIVE_TERMS = 2
+SPECIFIC_DF = 100        # a term printed on at most this many corpus pages is distinctive
+STRONG_OVERLAP = 0.6     # close enough to verbatim that the wording itself is the evidence
 MAX_CLAIM_CHARS = 700
 MAX_SHIFT = 3                     # how far to look for the page that really holds the text
 SHIFT_GAIN = 0.2                  # a shift must be clearly better than the cited page
@@ -96,6 +118,45 @@ def _normalise(text: str) -> str:
     sides makes a term search work on such text.
     """
     return _NON_ALNUM_RE.sub("", str(text or "").lower())
+
+
+# term -> how many corpus pages print it. Built once per corpus root, because "distinctive"
+# cannot be judged from the page alone: "timing" is on 1,208 of 15,767 pages and proves
+# nothing, while "minimizing" is on 17.
+_PAGE_TERM_DF: Dict[str, Dict[str, int]] = {}
+
+
+def _page_term_counts(root: Optional[Path] = None) -> Optional[Dict[str, int]]:
+    """How many pages print each word, or ``None`` when the corpus cannot be read.
+
+    ``None`` means "cannot judge", and callers treat that as "do not add a new way to fail" -
+    a missing corpus is already reported as unverified by :func:`corpus_available`.
+    """
+    key = str(corpus_dir(root).resolve())
+    if key in _PAGE_TERM_DF:
+        return _PAGE_TERM_DF[key] or None
+    counts: Dict[str, int] = {}
+    try:
+        for path in corpus_dir(root).glob("*.txt"):
+            raw = path.read_text(encoding="utf-8", errors="ignore")
+            markers = list(PAGE_MARKER_RE.finditer(raw))
+            for position, marker in enumerate(markers):
+                start = marker.end()
+                end = markers[position + 1].start() if position + 1 < len(markers) else len(raw)
+                for term in set(_WORD_RE.findall(raw[start:end].lower())):
+                    counts[term] = counts.get(term, 0) + 1
+    except OSError:
+        return None
+    _PAGE_TERM_DF[key] = counts
+    return counts or None
+
+
+def is_distinctive(term: str, root: Optional[Path] = None) -> bool:
+    """True when *term* is printed on few enough pages to identify a claim."""
+    counts = _page_term_counts(root)
+    if counts is None:
+        return True          # cannot judge: do not invent a new failure mode
+    return counts.get(term, 0) <= SPECIFIC_DF
 
 
 def claim_terms(claim: str, limit: int = 25) -> List[str]:
@@ -156,6 +217,24 @@ def claim_span(text: str, end: int) -> str:
     return head.strip()
 
 
+def _supported(overlap: float, matched: List[str],
+               root: Optional[Path] = None) -> Tuple[bool, List[str], str]:
+    """Is this page enough evidence for the sentence? ``(ok, distinctive, reason)``.
+
+    Overlap alone cannot separate "the page says this" from "the page is about this": the two
+    sentences this rule was built for scored 0.33 and 0.14 on pages that share only words like
+    *timing*, *paths* and *possible*. A near-verbatim quote is accepted as it stands; anything
+    looser must include a word the corpus prints on few pages.
+    """
+    if overlap < MIN_OVERLAP or len(matched) < MIN_MATCHED_TERMS:
+        return False, [], "the page does not carry the wording of this sentence"
+    distinctive = [term for term in matched if is_distinctive(term, root)]
+    if overlap >= STRONG_OVERLAP or len(distinctive) >= MIN_DISTINCTIVE_TERMS:
+        return True, distinctive, ""
+    return False, [], ("the page shares only generic words with this sentence "
+                       f"({', '.join(matched[:6])}); none of them is distinctive")
+
+
 def verify_citation(source: str, page: int, claim: str,
                     root: Optional[Path] = None) -> Dict[str, Any]:
     """Check one citation against the corpus. Never raises."""
@@ -181,12 +260,13 @@ def verify_citation(source: str, page: int, claim: str,
                 "page_exists": False}
 
     overlap, matched = _overlap(terms, _normalise(page_text))
-    best = {"page": page, "overlap": overlap, "matched": matched}
+    ok, distinctive, why = _supported(overlap, matched, root=root)
+    best = {"page": page, "overlap": overlap, "matched": matched, "distinctive": distinctive}
 
-    if overlap >= MIN_OVERLAP and len(matched) >= MIN_MATCHED_TERMS:
+    if ok:
         return {"source": source, "page": page, "status": "verified", "reason": "",
-                "matched": matched, "overlap": round(overlap, 3), "correct_page": page,
-                "terms": len(terms), "page_exists": True}
+                "matched": matched, "distinctive": distinctive, "overlap": round(overlap, 3),
+                "correct_page": page, "terms": len(terms), "page_exists": True}
 
     # Off-by-N: look nearby for the page that actually prints this sentence.
     for distance in range(1, MAX_SHIFT + 1):
@@ -198,22 +278,26 @@ def verify_citation(source: str, page: int, claim: str,
                 continue
             n_overlap, n_matched = _overlap(terms, _normalise(neighbour))
             if n_overlap > best["overlap"]:
-                best = {"page": candidate, "overlap": n_overlap, "matched": n_matched}
+                n_ok, n_distinctive, _why = _supported(n_overlap, n_matched, root=root)
+                if n_ok:
+                    best = {"page": candidate, "overlap": n_overlap, "matched": n_matched,
+                            "distinctive": n_distinctive}
 
     if (best["page"] != page and best["overlap"] >= MIN_OVERLAP
             and len(best["matched"]) >= MIN_MATCHED_TERMS
             and best["overlap"] - overlap >= SHIFT_GAIN):
         return {"source": source, "page": page, "status": "page_shifted",
                 "reason": f"the quoted text is on page {best['page']}",
-                "matched": best["matched"], "overlap": round(overlap, 3),
+                "matched": best["matched"], "distinctive": best["distinctive"],
+                "overlap": round(overlap, 3),
                 "correct_page": best["page"], "correct_overlap": round(best["overlap"], 3),
                 "terms": len(terms), "page_exists": True}
 
     return {"source": source, "page": page, "status": "unverified",
-            "reason": ("the page exists but does not carry the quoted wording"
-                       if terms else "no distinctive wording to check"),
-            "matched": matched, "overlap": round(overlap, 3), "correct_page": None,
-            "terms": len(terms), "page_exists": True}
+            "reason": why or ("the page exists but does not carry the quoted wording"
+                              if terms else "no distinctive wording to check"),
+            "matched": matched, "distinctive": distinctive, "overlap": round(overlap, 3),
+            "correct_page": None, "terms": len(terms), "page_exists": True}
 
 
 def normalise_citations(text: str) -> Tuple[str, int]:

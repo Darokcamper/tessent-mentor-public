@@ -484,11 +484,12 @@ def execute_tool(tool_name, args):
         return validate_tcl_syntax(script)
         
     elif tool_name == "search_web":
-        if isinstance(args, dict):
-            query = args.get("query", "")
-        else:
-            query = args[0] if len(args) > 0 else ""
-        return search_web(query)
+        # Owner decision 2026-11-25: answers may only state what the supplied sources say.
+        # The web is not a source this tool can verify page-by-page, so it is refused rather
+        # than silently becoming an uncitable influence on the answer.
+        return ("Error: search_web is disabled for answer generation. Answers must be grounded "
+                "only in the verified sources; use search_verified_notes or "
+                "read_source_file_page instead.")
         
     elif tool_name == "consult_other_expert":
         if isinstance(args, dict):
@@ -536,8 +537,9 @@ You have access to the following tools:
 4. `remember_design_constraint(key: str, value: str)`: Saves or updates a design constraint in the SQLite memory database.
 5. `recall_design_constraint(key: str)`: Recalls a saved design constraint from the SQLite memory database.
 6. `validate_tcl_syntax(script: str)`: Validates the syntax of a TCL script, checking for balanced braces, brackets, parentheses, and quotes.
-7. `search_web(query: str)`: Searches the web for a query to retrieve external technical info or references.
-8. `consult_other_expert(expert_name: str, question: str)`: Consults another expert agent dynamically by name (e.g. 'SCAN', 'STA', 'ATPG', 'EDT', 'MBIST', 'JTAG', 'IJTAG', 'WRAPPER', 'OCC', 'BOUNDARYSCAN', 'GLS', 'TCL', 'LINUX', 'GENERAL') and returns their answer.
+7. `consult_other_expert(expert_name: str, question: str)`: Consults another expert agent dynamically by name (e.g. 'SCAN', 'STA', 'ATPG', 'EDT', 'MBIST', 'JTAG', 'IJTAG', 'WRAPPER', 'OCC', 'BOUNDARYSCAN', 'GLS', 'TCL', 'LINUX', 'GENERAL') and returns their answer.
+
+There is no web search: answers may only state what the verified sources say.
 
 Format to follow:
 You MUST respond using the following structured format at each step. Do NOT output anything else before the Thought, and do NOT combine thoughts and final answers.
@@ -548,7 +550,30 @@ Action: <tool_name>(<arguments>)
 Once you receive the tool output (Observation), you will formulate another Thought. You can repeat this process up to 4 times. Once you have all the necessary information to answer, output:
 
 Thought: I have retrieved sufficient verified information to answer the question.
-Final Answer: <Your final comprehensive answer, strictly grounded in the observations. Always start your Final Answer with a "### 🧑‍🏫 Layman's Explanation" section explaining the core concept in plain, simple, everyday terms/analogies for a beginner. Then follow with your comprehensive technical explanation, citing the Source Document and Page when referencing ideas from the notes. Avoid repeating any OCR noise or corrupted formulas, and explain them in correct standard engineering English. Structure your answer with clear headings, bullet points, and comparison tables where appropriate.>
+Final Answer: <The answer, built ONLY from the observations. Structure it as:>
+
+  ### Answer
+  <The question answered in one to three sentences, each ending with its own [Source: <file>, Page <N>].>
+
+  ### Evidence
+  <One bullet per fact. Each bullet is ONE sentence and ends with its own [Source: <file>, Page <N>].>
+
+  ### Not covered by the sources
+  <Only if the question asked for something the observations do not contain: name that part in
+  one line, with no guess at the answer. Omit this section entirely when the answer is complete.>
+
+ANSWER RULES (MANDATORY - accuracy outranks answering):
+- No analogies, metaphors, comparisons to everyday life, or "think of it as ..." explanations.
+  They assert technical behaviour the sources never state.
+- No background knowledge, no general DFT/VLSI knowledge, no reasoning from first principles.
+  If a sentence is not supported by an observation, do not write it.
+- Every sentence that states a fact carries its own citation on that same sentence. A citation
+  at the end of a paragraph does not cover the sentences before it.
+- Do not use hedges the page does not use ("typically", "generally", "in most cases", "often",
+  "it is recommended") unless the observation prints that word.
+- Do not add a conclusion, summary, comparison table, or "why this matters" section. The reader
+  wants what the sources say, not an essay.
+- Prefer quoting the page's own wording over paraphrasing it.
 
 If you cannot find the answer in the verified documents after searching, your Final Answer MUST be: "I do not have the exact answer in my verified source documents." and then list the relevant source files or manuals found in the context with citations (e.g., `[Source: filename, Page N]`) and a 1-sentence summary of what topics that file covers on that page, recommending how the user can refine their question.
 
@@ -561,6 +586,9 @@ CITATION RULE (MANDATORY - a citation you cannot prove is worse than no citation
 - If no observation supports a sentence, leave the citation off that sentence and say the
   detail is not in the verified documents. Never attach a citation to cover a gap.
 - An answer with no verified page must say so plainly instead of citing anything.
+
+Every sentence you write is re-checked against the page you cite, and sentences that page does
+not support are deleted before the user sees the answer. Writing less is the safer choice.
 
 Let's begin!
 """
