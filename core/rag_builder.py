@@ -26,6 +26,10 @@ except Exception:
 from sentence_transformers import SentenceTransformer
 import faiss
 
+from core.rag_ranking import (diversify, lexical_boost, lexical_weight_from_env,
+                              max_per_source_from_env, query_tokens, rare_term_hits,
+                              rarity_weights)
+
 
 # Paths
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -613,7 +617,6 @@ def retrieve(query, top_k=5, source_filter=None):
             return []
             
         # Reconstruct vectors from FAISS index and calculate cosine similarities locally
-        import numpy as np
         doc_vectors = []
         for idx in doc_indices:
             vec = _loaded_index.reconstruct(idx)
@@ -630,20 +633,20 @@ def retrieve(query, top_k=5, source_filter=None):
         for score, chunk in zip(scores, doc_chunks):
             boost = 0.0
             # Check for numbers in the query (e.g. "3", "4") matching rule headers (e.g. "3.", "4.")
-            for num in _re.findall(r"\b\d+\b", query):
+            for num in re.findall(r"\b\d+\b", query):
                 # Strong boost for slide headers starting with '# 3' or '# 4' or starting with '3.'
-                if _re.search(r"#\s*" + num + r"\b", chunk["text"]):
+                if re.search(r"#\s*" + num + r"\b", chunk["text"]):
                     boost += 1.2
-                elif _re.search(r"^\s*" + num + r"\b[\.\-:]", chunk["text"]):
+                elif re.search(r"^\s*" + num + r"\b[\.\-:]", chunk["text"]):
                     boost += 1.2
                 # Medium boost for rule numbers inside the text
-                elif _re.search(r"\b" + num + r"\b[\.\-:]", chunk["text"]):
+                elif re.search(r"\b" + num + r"\b[\.\-:]", chunk["text"]):
                     boost += 0.4
-                elif _re.search(r"page\s+" + num + r"\b", chunk["text"].lower()):
+                elif re.search(r"page\s+" + num + r"\b", chunk["text"].lower()):
                     boost += 0.4
-                    
+
             # Check for specific technical terms in the query matching chunk text
-            query_words = [w.lower() for w in _re.findall(r"\b[a-zA-Z]{3,}\b", query) if w.lower() not in ["what", "about", "from", "scan", "rule", "rules", "with", "this", "that", "they", "them"]]
+            query_words = [w.lower() for w in re.findall(r"\b[a-zA-Z]{3,}\b", query) if w.lower() not in ["what", "about", "from", "scan", "rule", "rules", "with", "this", "that", "they", "them"]]
             for qw in query_words:
                 if qw in chunk["text"].lower():
                     boost += 0.1
@@ -651,6 +654,12 @@ def retrieve(query, top_k=5, source_filter=None):
             boosted_ranked.append((score + boost, chunk))
             
         ranked = sorted(boosted_ranked, key=lambda x: x[0], reverse=True)
+        # Source diversity, on by default (see core.rag_ranking.DEFAULT_MAX_PER_SOURCE).
+        # VM_RAG_MAX_PER_SOURCE=0 restores winner-takes-all ranking.
+        per_source_cap = max_per_source_from_env()
+        ranked = diversify(ranked, top_k, per_source_cap)
+
+
         
         # Retrieve the top_k boosted results
         top_results = ranked[:top_k]
@@ -669,13 +678,35 @@ def retrieve(query, top_k=5, source_filter=None):
         return results
 
     # Global search when no source filter is specified: retrieve candidate pool and rerank
-    candidate_k = min(len(_loaded_metadata), max(top_k * 4, 32))
+    # Wider pool than before: a chunk that matches a rare term may sit outside the first 32 by
+    # cosine alone, and the lexical boost cannot promote a candidate it never sees.
+    candidate_k = min(len(_loaded_metadata), max(top_k * 8, 64))
     scores, indices = _loaded_index.search(query_vector, candidate_k)
-    
+
+    # Rare-term support. With 184 transcript files and a 47%-of-index manual, a precise query
+    # term has no chance on cosine similarity alone: "flatmodel" (9 mentions in one file, one
+    # mention in three others) returned no page of that file at all.
+    tokens = query_tokens(query)
+    chunk_texts = [c.get("text", "") for c in _loaded_metadata]
+    weights = rarity_weights(tokens, chunk_texts, len(chunk_texts))
+    lexical_weight = lexical_weight_from_env()
+
+    pool = [(float(score), int(idx)) for score, idx in zip(scores[0], indices[0])
+            if 0 <= idx < len(_loaded_metadata)]
+    # Measured: the note that defines "flatmodel" scores 0.31 cosine and sits at rank 101 of
+    # 30,788 - outside the candidate pool, so no reranking weight could ever surface it. Add
+    # the chunks of rare query terms to the pool explicitly instead of relying on the cut-off.
+    known = {idx for _score, idx in pool}
+    for positions in rare_term_hits(tokens, chunk_texts).values():
+        for idx in positions:
+            if idx in known:
+                continue
+            known.add(idx)
+            # Vectors are L2-normalised when the index is built, so the dot product is cosine.
+            pool.append((float(np.dot(_loaded_index.reconstruct(idx), query_vector[0])), idx))
+
     candidates = []
-    for score, idx in zip(scores[0], indices[0]):
-        if idx < 0 or idx >= len(_loaded_metadata):
-            continue
+    for score, idx in pool:
         chunk = _loaded_metadata[idx]
         text = chunk.get("text", "")
         src = chunk.get("source", "").lower()
@@ -691,12 +722,19 @@ def retrieve(query, top_k=5, source_filter=None):
         # Penalize near-empty screenshot slide title stubs that lack body text
         if len(text.strip()) < 120 and "screenshot" in text.lower():
             boost -= 0.30
-            
+
+        boost += lexical_boost(tokens, weights, text, weight=lexical_weight)
+
         final_score = float(score) + boost
         candidates.append((final_score, chunk))
         
     candidates.sort(key=lambda x: x[0], reverse=True)
-    
+
+    # Same per-source cap as the filtered branch: one 5,000-page manual is 47% of this index,
+    # and a single file was measured taking 9 of the top 10 slots for an interview-prep query.
+    per_source_cap = max_per_source_from_env()
+    candidates = diversify(candidates, top_k, per_source_cap)
+
     results = []
     for score, chunk in candidates[:top_k]:
         results.append({

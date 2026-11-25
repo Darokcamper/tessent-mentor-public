@@ -31,6 +31,21 @@ CITATION_RE = re.compile(
     r"\[Source:\s*(?P<source>[^\[\],]+?)\s*,\s*Page\s*(?P<page>\d{1,5})\s*\]",
     re.IGNORECASE,
 )
+# A model that emits "[; tshell_ref (1).txt, Page 495]" has produced a citation that
+# CITATION_RE cannot see, so it was neither checked nor shown in canonical form. Only brackets
+# that carry a real corpus file name and a page number are rewritten, and the file must keep
+# its extension: that keeps ordinary prose such as "[see the lab, page 5]" untouched.
+MALFORMED_CITATION_RE = re.compile(
+    r"\[\s*"
+    r"(?:source\s*[:;\-]?\s*)?"
+    r"[;:,.\-]*\s*"
+    r"(?P<source>[A-Za-z0-9][^\[\],;]{0,160}?\.(?:txt|pdf))"
+    r"\s*[,;:]?\s*"
+    r"page\s*(?P<page>\d{1,5})\s*"
+    r"[,;]?\s*"
+    r"\]",
+    re.IGNORECASE,
+)
 _WORD_RE = re.compile(r"[a-z0-9_]+")
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
@@ -201,9 +216,32 @@ def verify_citation(source: str, page: int, claim: str,
             "terms": len(terms), "page_exists": True}
 
 
+def normalise_citations(text: str) -> Tuple[str, int]:
+    """Rewrite malformed citation brackets into ``[Source: <file>, Page <N>]``.
+
+    Returns the normalised text and how many brackets were rewritten. Models occasionally
+    emit a citation whose label is junk - production review caught "[; tshell_ref (1).txt,
+    Page 495]" - and ``CITATION_RE`` cannot see that, so the citation was neither checked nor
+    displayed in canonical form. Rewriting the bracket first means the page is still verified;
+    the wording around the bracket is never touched.
+    """
+    rewrites = 0
+
+    def _replace(match: "re.Match") -> str:
+        nonlocal rewrites
+        canonical = f"[Source: {match.group('source').strip()}, Page {int(match.group('page'))}]"
+        if canonical == match.group(0):
+            return match.group(0)
+        rewrites += 1
+        return canonical
+
+    return MALFORMED_CITATION_RE.sub(_replace, str(text or "")), rewrites
+
+
 def verify_text(text: str, root: Optional[Path] = None) -> Dict[str, Any]:
     """Verify every citation in *text*; returns a report plus page-corrected text."""
-    body = str(text or "")
+    original = str(text or "")
+    body, normalised = normalise_citations(original)
     checks: List[Dict[str, Any]] = []
     corrected = body
     matches = list(CITATION_RE.finditer(body))
@@ -233,7 +271,8 @@ def verify_text(text: str, root: Optional[Path] = None) -> Dict[str, Any]:
         "pages_missing": len(missing),
         "corpus_available": corpus_available(root),
         "corrected_text": corrected,
-        "changed": corrected != body,
+        "citations_normalised": normalised,
+        "changed": corrected != original,
         "all_verified": bool(checks) and counts["unverified"] == 0 and counts["page_shifted"] == 0,
     }
 
